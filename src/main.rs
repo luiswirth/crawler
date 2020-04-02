@@ -11,19 +11,19 @@ use surf;
 type Result = std::result::Result<(), Box<dyn std::error::Error + Send + Sync + 'static>>;
 type BoxFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result> + Send>>;
 
-#[derive(Debug)]
-enum Link {
-    Unparsed(String),
-    Parsed(Url),
+#[derive(Default, Debug)]
+struct UnparsedFindings {
+    page_links: Vec<String>,
+    image_links: Vec<String>,
 }
 
 #[derive(Default, Debug)]
 struct Findings {
-    page_links: Vec<Link>,
-    image_links: Vec<Link>,
+    page_links: Vec<Url>,
+    image_links: Vec<Url>,
 }
 
-impl TokenSink for &mut Findings {
+impl TokenSink for &mut UnparsedFindings {
     type Handle = ();
 
     fn process_token(&mut self, token: Token, _line_number: u64) -> TokenSinkResult<Self::Handle> {
@@ -41,9 +41,9 @@ impl TokenSink for &mut Findings {
                     for attribute in tag.attrs.iter() {
                         if attribute.name.local.as_ref() == "href" {
                             let url_str: &[u8] = attribute.value.borrow();
-                            self.page_links.push(Link::Unparsed(
+                            self.page_links.push(
                                 String::from_utf8_lossy(url_str).into_owned(),
-                            ));
+                            );
                         }
                     }
                 }
@@ -51,9 +51,9 @@ impl TokenSink for &mut Findings {
                     for attribute in tag.attrs.iter() {
                         if attribute.name.local.as_ref() == "src" {
                             let url_str: &[u8] = attribute.value.borrow();
-                            self.image_links.push(Link::Unparsed(
+                            self.image_links.push(
                                 String::from_utf8_lossy(url_str).into_owned(),
-                            ));
+                            );
                         }
                     }
                 }
@@ -65,24 +65,21 @@ impl TokenSink for &mut Findings {
     }
 }
 
-impl Link {
-    fn parse(&mut self, page_url: &Url) {
-        if let Link::Unparsed(link) = self {
-            *self = Link::Parsed(match Url::parse(link) {
-                Err(ParseError::RelativeUrlWithoutBase) => page_url.join(link).unwrap(),
-                Err(_) => panic!("Malformed link found: {}", link),
-                Ok(url) => url,
-            });
-        } else {
-            panic!("link already parsed");
-        }
-    }
+fn parse_links(links: Vec<String>, page_url: &Url) -> Vec<Url> {
+    links.into_iter().map(|l|
+	match Url::parse(&l) {
+	    Err(ParseError::RelativeUrlWithoutBase) => page_url.join(&l).unwrap(),
+	    Err(_) => panic!("Malformed link found: {}", l),
+	    Ok(url) => url,
+	}).collect()
 }
 
-impl Findings {
-    fn parse(&mut self, page_url: &Url) {
-        self.page_links.iter_mut().for_each(|l| l.parse(&page_url));
-        self.image_links.iter_mut().for_each(|l| l.parse(&page_url));
+impl UnparsedFindings {
+    fn parse(self, page_url: &Url) -> Findings {
+	Findings {
+	    page_links: parse_links(self.page_links, page_url),
+	    image_links: parse_links(self.image_links, page_url),
+	}
     }
 }
 
@@ -91,13 +88,13 @@ fn process_page(page_url: &Url, page_body: String) -> Findings {
     page_url.set_path("");
     page_url.set_query(None);
 
-    let mut findings = Findings::default();
+    let mut findings = UnparsedFindings::default();
     let mut tokenizer = Tokenizer::new(&mut findings, TokenizerOpts::default());
     let mut buffer = BufferQueue::new();
     buffer.push_back(page_body.into());
     let _ = tokenizer.feed(&mut buffer);
 
-    findings.parse(&page_url);
+    let findings = findings.parse(&page_url);
     findings
 }
 
@@ -118,14 +115,7 @@ async fn crawl_loop(pages: Vec<Url>, current: u8, max: u8) -> Result {
 
             // add new_findings to findings!
 
-            let new_page_links = new_findings
-                .page_links
-                .iter()
-                .map(|l| match l {
-                    Link::Parsed(link) => link.clone(),
-                    Link::Unparsed(_) => unreachable!(),
-                })
-                .collect::<Vec<Url>>();
+            let new_page_links = new_findings.page_links;
 
             box_crawl_loop(new_page_links, current + 1, max).await
         });
