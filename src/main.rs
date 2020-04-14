@@ -1,3 +1,6 @@
+use log::{debug, error, info, trace, warn};
+use chrono;
+
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
     TokenizerOpts,
@@ -7,6 +10,7 @@ use url::{ParseError, Url};
 use surf;
 
 use async_std::{
+    future,
     task, sync::{Arc, Mutex},
     fs::File,
     io::prelude::*,
@@ -21,6 +25,8 @@ type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>
 
 // goal: use _shared-state concurrency_ (multiple ownership) to accumulate the findings
 // from all tasks into one collection.
+
+const GET_REQUEST_TIMEOUT: Duration = Duration::from_micros(60000);
 
 #[derive(Default, Debug)]
 struct UnparsedFindings {
@@ -115,10 +121,9 @@ async fn crawl_loop(
     max: u8,
     findings: Arc<Mutex<Findings>>,
 ) -> Result<()> {
-    //println!("Current recursion depth: {}, max depth: {}", current, max);
+    debug!("Current recursion depth: {}, max depth: {}", current, max);
 
     if current >= max {
-        //println!("Reached max depth");
         return Ok(());
     }
 
@@ -126,12 +131,11 @@ async fn crawl_loop(
     for url in pages {
         let findings = Arc::clone(&findings);
         let task = task::spawn(async move {
-            let timeout_duration = Duration::from_millis(2000);
-            let timeout_future = async_std::future::timeout(timeout_duration, surf::get(&url));
+            let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
             let request = match timeout_future.await {
                 Ok(request) => request,
                 Err(_) => {
-                    eprintln!("Error: GET-request timeout with url `{}`", &url);
+                    error!("Error: GET-request timeout with url `{}`", &url);
                     return Ok(());
                 }
             };
@@ -153,14 +157,14 @@ async fn crawl_loop(
             let new_page_links = new_findings.page_links;
             box_crawl_loop(new_page_links, current + 1, max, findings).await
         });
-        //println!("new task");
+        debug!("new task spawned");
         tasks.push(task);
     }
 
 
     for task in tasks.into_iter() {
         task.await?;
-        //println!("task done");
+        debug!("task done");
     }
 
     Ok(())
@@ -180,19 +184,18 @@ async fn fetch_images(urls: Vec<Url>) -> Result<()> {
     let mut tasks = Vec::new();
     for url in urls.into_iter() {
 	let task = task::spawn(async move {
-	    println!("fetching `{}`", url);
+	    info!("fetching `{}`", url);
 	    let path_segments = url.path_segments().ok_or_else(|| "cannot be base")?;
 	    let file_path = path_segments.last().unwrap();
 	    let file_path = format!("imgs/{}", file_path);
 	    let mut file = File::create(file_path).await?;
 
 
-	    let timeout_duration = Duration::from_millis(2000);
-	    let timeout_future = async_std::future::timeout(timeout_duration, surf::get(&url));
+	    let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
 	    let request = match timeout_future.await {
 		Ok(request) => request,
 		Err(_) => {
-		    eprintln!("Error: GET-request timeout with url `{}`", &url);
+		    error!("Error: GET-request timeout with url `{}`", &url);
 		    return Ok::<(), Error>(());
 		}
 	    };
@@ -222,8 +225,28 @@ pub fn crawl(pages: Vec<Url>, max_recursion: u8) {
     });
 }
 
+
+fn setup_logger() -> std::result::Result<(), fern::InitError> {
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Trace)
+        .chain(std::io::stdout())
+        .chain(fern::log_file("log/crawler.log")?)
+        .apply()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
-    let urls = vec![Url::parse("https://www.rust-lang.org").unwrap()];
+    setup_logger()?;
+    let urls = vec![Url::parse("https://bing.com").unwrap()];
     crawl(urls, 2);
     Ok(())
 }
