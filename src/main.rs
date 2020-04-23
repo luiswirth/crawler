@@ -1,5 +1,5 @@
-use log::{debug, error, info, trace, warn};
 use chrono;
+use log::{debug, error, info, trace, warn};
 
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
@@ -10,10 +10,11 @@ use url::{ParseError, Url};
 use surf;
 
 use async_std::{
-    future,
-    task, sync::{Arc, Mutex},
     fs::File,
+    future,
     io::prelude::*,
+    sync::{Arc, Mutex},
+    task,
 };
 
 use std::borrow::Borrow;
@@ -26,7 +27,7 @@ type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>
 // goal: use _shared-state concurrency_ (multiple ownership) to accumulate the findings
 // from all tasks into one collection.
 
-const GET_REQUEST_TIMEOUT: Duration = Duration::from_micros(60000);
+const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
 
 #[derive(Default, Debug)]
 struct UnparsedFindings {
@@ -83,10 +84,10 @@ impl TokenSink for &mut UnparsedFindings {
 fn parse_links(links: Vec<String>, page_url: &Url) -> Vec<Url> {
     links
         .into_iter()
-        .map(|l| match Url::parse(&l) {
-            Err(ParseError::RelativeUrlWithoutBase) => page_url.join(&l).unwrap(),
-            Err(_) => panic!("Malformed link found: {}", l),
-            Ok(url) => url,
+        .filter_map(|l| match Url::parse(&l) {
+            Err(ParseError::RelativeUrlWithoutBase) => Some(page_url.join(&l).unwrap()),
+            Err(_) => { warn!("Malformed link found: {}", l); None },
+            Ok(url) => Some(url),
         })
         .collect()
 }
@@ -131,6 +132,7 @@ async fn crawl_loop(
     for url in pages {
         let findings = Arc::clone(&findings);
         let task = task::spawn(async move {
+            info!("crawling url `{}`", &url);
             let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
             let request = match timeout_future.await {
                 Ok(request) => request,
@@ -155,12 +157,12 @@ async fn crawl_loop(
             }
 
             let new_page_links = new_findings.page_links;
-            box_crawl_loop(new_page_links, current + 1, max, findings).await
+            box_crawl_loop(new_page_links, current + 1, max, findings).await?;
+	    Ok::<(), Error>(())
         });
         debug!("new task spawned");
         tasks.push(task);
     }
-
 
     for task in tasks.into_iter() {
         task.await?;
@@ -183,48 +185,52 @@ fn box_crawl_loop(
 async fn fetch_images(urls: Vec<Url>) -> Result<()> {
     let mut tasks = Vec::new();
     for url in urls.into_iter() {
-	let task = task::spawn(async move {
-	    info!("fetching `{}`", url);
-	    let path_segments = url.path_segments().ok_or_else(|| "cannot be base")?;
-	    let file_path = path_segments.last().unwrap();
-	    let file_path = format!("imgs/{}", file_path);
-	    let mut file = File::create(file_path).await?;
+        let task = task::spawn(async move {
+            info!("fetching `{}`", url);
+            let path_segments = match url.path_segments() {
+                Some(segs) => segs,
+                None => {
+                    return Ok(());
+                }
+            };
+            let file_path = path_segments.last().unwrap();
+            let file_path = format!("imgs/{}", file_path);
+            let mut file = File::create(file_path).await?;
 
+            let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
+            let request = match timeout_future.await {
+                Ok(request) => request,
+                Err(_) => {
+                    error!("Error: GET-request timeout with url `{}`", &url);
+                    return Ok::<(), Error>(());
+                }
+            };
 
-	    let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
-	    let request = match timeout_future.await {
-		Ok(request) => request,
-		Err(_) => {
-		    error!("Error: GET-request timeout with url `{}`", &url);
-		    return Ok::<(), Error>(());
-		}
-	    };
-
-	    let mut res = request?;
-	    let img_bytes: Vec<u8> = res.body_bytes().await?;
-	    let _ = file.write(&img_bytes).await?;
-	    Ok(())
-	});
-	tasks.push(task);
+            let mut res = request?;
+            let img_bytes: Vec<u8> = res.body_bytes().await?;
+            let _ = file.write(&img_bytes).await?;
+            Ok::<(), Error>(())
+        });
+        tasks.push(task);
     }
     for task in tasks.into_iter() {
-	task.await?;
+        task.await?;
     }
     Ok(())
 }
 
-pub fn crawl(pages: Vec<Url>, max_recursion: u8) {
+pub fn crawl(pages: Vec<Url>, max_recursion: u8) -> Result<()> {
     let findings = Arc::new(Mutex::new(Findings::default()));
     task::block_on(async {
         box_crawl_loop(pages, 0, max_recursion, Arc::clone(&findings))
-            .await
-            .unwrap();
-	let findings = Arc::try_unwrap(findings).unwrap(); // remove Arc hull
-	let findings_inner = findings.into_inner(); // remove Mutex hull
-	fetch_images(findings_inner.image_links).await.unwrap();
-    });
+            .await?;
+        let findings = Arc::try_unwrap(findings).unwrap(); // remove Arc hull
+        let findings_inner = findings.into_inner(); // remove Mutex hull
+        fetch_images(findings_inner.image_links).await?;
+	Ok::<(), Error>(())
+    })?;
+    Ok(())
 }
-
 
 fn setup_logger() -> std::result::Result<(), fern::InitError> {
     fern::Dispatch::new()
@@ -237,7 +243,7 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
                 message
             ))
         })
-        .level(log::LevelFilter::Trace)
+        .level(log::LevelFilter::Info)
         .chain(std::io::stdout())
         .chain(fern::log_file("log/crawler.log")?)
         .apply()?;
@@ -246,8 +252,8 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
 
 fn main() -> Result<()> {
     setup_logger()?;
-    let urls = vec![Url::parse("https://bing.com").unwrap()];
-    crawl(urls, 2);
+    let urls = vec![Url::parse("https://doc.rust-lang.org/std/iter/trait.Iterator.html#method.flat_map").unwrap()];
+    crawl(urls, 4)?;
     Ok(())
 }
 

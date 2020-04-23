@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 async-std = "1.5.0"
-surf = "2.0.0-alpha.0"
+surf = "2.0.0-alpha.1"
 html5ever = "0.25.1"
 url = "2.1.0"
 
