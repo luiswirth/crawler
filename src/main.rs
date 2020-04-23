@@ -5,6 +5,8 @@ use chrono;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
+use clap::{App, Arg};
+
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
     TokenizerOpts,
@@ -122,7 +124,6 @@ fn process_page(page_url: &Url, page_body: String) -> Findings {
     findings.parse(&page_url)
 }
 
-
 async fn crawl_loop(
     pages: Vec<Url>,
     current: u8,
@@ -150,7 +151,7 @@ async fn crawl_loop(
                 Ok(request) => match request {
                     Ok(page) => page,
                     Err(err) => {
-                        error!("url `{}`: {}", &url, err);
+                        error!("GET-request error `{}` with url `{}`", err, &url);
                         return Ok(());
                     }
                 },
@@ -221,8 +222,8 @@ async fn fetch_images(urls: Vec<Url>) -> Result<()> {
             let img_bytes = match request {
                 Ok(res) => res,
                 Err(err) => {
-                   error!("url `{}`: {}", &url, err);
-                   return Ok(());
+                    error!("GET-request error `{}` with url `{}`", err, &url);
+                    return Ok(());
                 }
             };
             let _ = file.write(&img_bytes).await?;
@@ -254,13 +255,28 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
         Dispatch,
     };
 
+    let file_dispatch = Dispatch::new()
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .chain(fern::log_file(format!(
+            "logs/{}.log",
+            chrono::Local::now().format("%Y-%m-%d_%H%M%S")
+        ))?);
+
     let colors = ColoredLevelConfig::new()
         .trace(Color::Blue)
         .info(Color::Green)
         .warn(Color::Magenta)
         .error(Color::Red);
 
-    Dispatch::new()
+    let term_dispatch = Dispatch::new()
         .format(move |out, message, record| {
             out.finish(format_args!(
                 "{}[{}][{}] {}",
@@ -270,20 +286,60 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
                 message
             ))
         })
+        .chain(std::io::stdout());
+
+    Dispatch::new()
         .level(log::LevelFilter::Warn)
-        .chain(std::io::stdout())
-        .chain(fern::log_file(format!(
-            "logs/{}.log",
-            chrono::Local::now().format("%Y-%m-%d_%H%M%S")
-        ))?)
+        .level_for("surf::middleware::logger::native", log::LevelFilter::Error)
+        .chain(term_dispatch)
+        .chain(file_dispatch)
         .apply()?;
+
     Ok(())
 }
 
 fn main() -> Result<()> {
     setup_logger()?;
-    let urls = vec![Url::parse("https://www.reddit.com").unwrap()];
-    crawl(urls, 4)?;
+
+    let app = App::new("crawler")
+        .version(env!("CARGO_PKG_NAME"))
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
+        .usage("crawler [OPTIONS] <url1> [url2] ...")
+        .before_help("")
+        .after_help("")
+        .arg(
+            Arg::with_name("url")
+                .value_name("URL")
+                .help("URL to start crawling from")
+                .takes_value(true)
+                .required(true)
+                .multiple(true),
+        )
+        .arg(
+            Arg::with_name("depth")
+                .short("d")
+                .long("depth")
+                .value_name("int")
+                .help("max recursion depth")
+                .takes_value(true)
+                .default_value("2"),
+        );
+
+    let matches = app.get_matches();
+    let depth = matches.value_of("depth").unwrap().parse().unwrap();
+    let urls = matches
+        .values_of("url")
+        .unwrap()
+        .map(|url| match Url::parse(url) {
+            Ok(url) => url,
+            Err(err) => panic!("{}", err),
+        })
+        .collect::<Vec<Url>>();
+
+    info!("crawling these urls:\n{:?}", urls);
+
+    crawl(urls, depth)?;
     Ok(())
 }
 

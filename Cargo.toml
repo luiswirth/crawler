@@ -10,8 +10,9 @@ edition = "2018"
 async-std = "1.5.0"
 surf = "2.0.0-alpha.1"
 html5ever = "0.25.1"
-url = "2.1.0"
+url = "2.1.1"
 
-log = "0.4"
-fern = { version = "0.6", features = ["colored"] }
-chrono = "0.4"
+log = "0.4.8"
+fern = { version = "0.6.0", features = ["colored"] }
+chrono = "0.4.11"
+clap = "2.33.0"
