@@ -1,4 +1,8 @@
+//!
+#![warn(missing_debug_implementations, rust_2018_idioms)]
+
 use chrono;
+#[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
 use html5ever::tokenizer::{
@@ -11,7 +15,7 @@ use surf;
 
 use async_std::{
     fs::File,
-    future,
+    future::timeout,
     io::prelude::*,
     sync::{Arc, Mutex},
     task,
@@ -86,7 +90,10 @@ fn parse_links(links: Vec<String>, page_url: &Url) -> Vec<Url> {
         .into_iter()
         .filter_map(|l| match Url::parse(&l) {
             Err(ParseError::RelativeUrlWithoutBase) => Some(page_url.join(&l).unwrap()),
-            Err(_) => { warn!("Malformed link found: {}", l); None },
+            Err(_) => {
+                warn!("Malformed link found: {}", l);
+                None
+            }
             Ok(url) => Some(url),
         })
         .collect()
@@ -112,9 +119,9 @@ fn process_page(page_url: &Url, page_body: String) -> Findings {
     buffer.push_back(page_body.into());
     let _ = tokenizer.feed(&mut buffer);
 
-    let findings = findings.parse(&page_url);
-    findings
+    findings.parse(&page_url)
 }
+
 
 async fn crawl_loop(
     pages: Vec<Url>,
@@ -133,16 +140,21 @@ async fn crawl_loop(
         let findings = Arc::clone(&findings);
         let task = task::spawn(async move {
             info!("crawling url `{}`", &url);
-            let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
-            let request = match timeout_future.await {
-                Ok(request) => request,
+
+            let future = timeout(GET_REQUEST_TIMEOUT, surf::get(&url).recv_string());
+            let body = match future.await {
                 Err(_) => {
-                    error!("Error: GET-request timeout with url `{}`", &url);
+                    warn!("GET-request timeout with url `{}`", &url);
                     return Ok(());
                 }
+                Ok(request) => match request {
+                    Ok(page) => page,
+                    Err(err) => {
+                        error!("url `{}`: {}", &url, err);
+                        return Ok(());
+                    }
+                },
             };
-            let mut page = request?;
-            let body = page.body_string().await?;
             let new_findings = process_page(&url, body);
 
             {
@@ -158,7 +170,7 @@ async fn crawl_loop(
 
             let new_page_links = new_findings.page_links;
             box_crawl_loop(new_page_links, current + 1, max, findings).await?;
-	    Ok::<(), Error>(())
+            Ok::<(), Error>(())
         });
         debug!("new task spawned");
         tasks.push(task);
@@ -194,20 +206,25 @@ async fn fetch_images(urls: Vec<Url>) -> Result<()> {
                 }
             };
             let file_path = path_segments.last().unwrap();
-            let file_path = format!("imgs/{}", file_path);
+            let file_path = format!("archive/imgs/{}", file_path);
             let mut file = File::create(file_path).await?;
 
-            let timeout_future = future::timeout(GET_REQUEST_TIMEOUT, surf::get(&url));
-            let request = match timeout_future.await {
+            let request = timeout(GET_REQUEST_TIMEOUT, surf::get(&url).recv_bytes());
+            let request = match request.await {
                 Ok(request) => request,
                 Err(_) => {
-                    error!("Error: GET-request timeout with url `{}`", &url);
-                    return Ok::<(), Error>(());
+                    warn!("GET-request timeout with url `{}`", &url);
+                    return Ok(());
                 }
             };
 
-            let mut res = request?;
-            let img_bytes: Vec<u8> = res.body_bytes().await?;
+            let img_bytes = match request {
+                Ok(res) => res,
+                Err(err) => {
+                   error!("url `{}`: {}", &url, err);
+                   return Ok(());
+                }
+            };
             let _ = file.write(&img_bytes).await?;
             Ok::<(), Error>(())
         });
@@ -222,37 +239,50 @@ async fn fetch_images(urls: Vec<Url>) -> Result<()> {
 pub fn crawl(pages: Vec<Url>, max_recursion: u8) -> Result<()> {
     let findings = Arc::new(Mutex::new(Findings::default()));
     task::block_on(async {
-        box_crawl_loop(pages, 0, max_recursion, Arc::clone(&findings))
-            .await?;
+        box_crawl_loop(pages, 0, max_recursion, Arc::clone(&findings)).await?;
         let findings = Arc::try_unwrap(findings).unwrap(); // remove Arc hull
         let findings_inner = findings.into_inner(); // remove Mutex hull
         fetch_images(findings_inner.image_links).await?;
-	Ok::<(), Error>(())
+        Ok::<(), Error>(())
     })?;
     Ok(())
 }
 
 fn setup_logger() -> std::result::Result<(), fern::InitError> {
-    fern::Dispatch::new()
-        .format(|out, message, record| {
+    use fern::{
+        colors::{Color, ColoredLevelConfig},
+        Dispatch,
+    };
+
+    let colors = ColoredLevelConfig::new()
+        .trace(Color::Blue)
+        .info(Color::Green)
+        .warn(Color::Magenta)
+        .error(Color::Red);
+
+    Dispatch::new()
+        .format(move |out, message, record| {
             out.finish(format_args!(
                 "{}[{}][{}] {}",
-                chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                chrono::Local::now().format("[%H:%M:%S]"),
                 record.target(),
-                record.level(),
+                colors.color(record.level()),
                 message
             ))
         })
-        .level(log::LevelFilter::Info)
+        .level(log::LevelFilter::Warn)
         .chain(std::io::stdout())
-        .chain(fern::log_file("log/crawler.log")?)
+        .chain(fern::log_file(format!(
+            "logs/{}.log",
+            chrono::Local::now().format("%Y-%m-%d_%H%M%S")
+        ))?)
         .apply()?;
     Ok(())
 }
 
 fn main() -> Result<()> {
     setup_logger()?;
-    let urls = vec![Url::parse("https://doc.rust-lang.org/std/iter/trait.Iterator.html#method.flat_map").unwrap()];
+    let urls = vec![Url::parse("https://www.reddit.com").unwrap()];
     crawl(urls, 4)?;
     Ok(())
 }
@@ -273,13 +303,5 @@ mod tests {
     #[should_panic]
     fn test_suite_works_2() {
         panic!()
-    }
-
-    #[test]
-    fn crawl_rust_website() {
-        task::block_on(async {
-            let urls = vec![Url::parse("https://www.rust-lang.org").unwrap()];
-            box_crawl(urls, 1, 2).await.unwrap();
-        });
     }
 }
