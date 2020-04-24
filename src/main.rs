@@ -5,8 +5,6 @@ use chrono;
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
-use clap::{App, Arg};
-
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
     TokenizerOpts,
@@ -16,22 +14,19 @@ use url::{ParseError, Url};
 use surf;
 
 use async_std::{
-    fs::File,
-    future::timeout,
-    io::prelude::*,
-    sync::{Arc, Mutex},
+    prelude::*,
     task,
+    sync::{Arc, Mutex},
+    future::timeout,
+    fs::File,
 };
 
 use std::borrow::Borrow;
 use std::time::Duration;
 
-type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
-type Result<T> = std::result::Result<T, Error>;
-type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>;
-
-// goal: use _shared-state concurrency_ (multiple ownership) to accumulate the findings
-// from all tasks into one collection.
+type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
+type DynResult<T> = std::result::Result<T, DynError>;
+type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = DynResult<T>> + Send>>;
 
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
 
@@ -129,7 +124,7 @@ async fn crawl_loop(
     current: u8,
     max: u8,
     findings: Arc<Mutex<Findings>>,
-) -> Result<()> {
+) -> DynResult<()> {
     debug!("Current recursion depth: {}, max depth: {}", current, max);
 
     if current >= max {
@@ -171,7 +166,7 @@ async fn crawl_loop(
 
             let new_page_links = new_findings.page_links;
             box_crawl_loop(new_page_links, current + 1, max, findings).await?;
-            Ok::<(), Error>(())
+            Ok::<(), DynError>(())
         });
         debug!("new task spawned");
         tasks.push(task);
@@ -195,7 +190,7 @@ fn box_crawl_loop(
     Box::pin(crawl_loop(pages, current, max, findings))
 }
 
-async fn fetch_images(urls: Vec<Url>) -> Result<()> {
+async fn fetch_images(urls: Vec<Url>) -> DynResult<()> {
     let mut tasks = Vec::new();
     for url in urls.into_iter() {
         let task = task::spawn(async move {
@@ -227,7 +222,7 @@ async fn fetch_images(urls: Vec<Url>) -> Result<()> {
                 }
             };
             let _ = file.write(&img_bytes).await?;
-            Ok::<(), Error>(())
+            Ok::<(), DynError>(())
         });
         tasks.push(task);
     }
@@ -237,14 +232,14 @@ async fn fetch_images(urls: Vec<Url>) -> Result<()> {
     Ok(())
 }
 
-pub fn crawl(pages: Vec<Url>, max_recursion: u8) -> Result<()> {
+pub fn crawl(pages: Vec<Url>, max_recursion: u8) -> DynResult<()> {
     let findings = Arc::new(Mutex::new(Findings::default()));
     task::block_on(async {
         box_crawl_loop(pages, 0, max_recursion, Arc::clone(&findings)).await?;
         let findings = Arc::try_unwrap(findings).unwrap(); // remove Arc hull
         let findings_inner = findings.into_inner(); // remove Mutex hull
         fetch_images(findings_inner.image_links).await?;
-        Ok::<(), Error>(())
+        Ok::<(), DynError>(())
     })?;
     Ok(())
 }
@@ -298,19 +293,26 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    setup_logger()?;
+#[derive(Default, Debug)]
+struct Crawler {
+    inital_urls: Vec<Url>,
+    max_recursion_depth: u8,
+    findings: Findings,
+}
 
-    let app = App::new("crawler")
+fn setup_app() -> Crawler {
+    use clap::{App as ClapApp, Arg};
+
+    let app = ClapApp::new("crawler")
         .version(env!("CARGO_PKG_NAME"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(env!("CARGO_PKG_DESCRIPTION"))
-        .usage("crawler [OPTIONS] <url1> [url2] ...")
+        .usage("crawler [OPTIONS] <url1> [url2 ...]")
         .before_help("")
         .after_help("")
         .arg(
             Arg::with_name("url")
-                .value_name("URL")
+                .value_name("url")
                 .help("URL to start crawling from")
                 .takes_value(true)
                 .required(true)
@@ -320,15 +322,17 @@ fn main() -> Result<()> {
             Arg::with_name("depth")
                 .short("d")
                 .long("depth")
-                .value_name("int")
+                .value_name("depth")
                 .help("max recursion depth")
                 .takes_value(true)
                 .default_value("2"),
         );
 
+    let mut crawler = Crawler::default();
+
     let matches = app.get_matches();
-    let depth = matches.value_of("depth").unwrap().parse().unwrap();
-    let urls = matches
+    crawler.max_recursion_depth = matches.value_of("depth").unwrap().parse().unwrap();
+    crawler.inital_urls = matches
         .values_of("url")
         .unwrap()
         .map(|url| match Url::parse(url) {
@@ -337,10 +341,29 @@ fn main() -> Result<()> {
         })
         .collect::<Vec<Url>>();
 
-    info!("crawling these urls:\n{:?}", urls);
+    crawler
+}
 
-    crawl(urls, depth)?;
+fn main() -> DynResult<()> {
+    setup_logger()?;
+    let crawler = setup_app();
+
+    info!("crawling these urls:\n{:?}", crawler.inital_urls);
+
+    crawl(crawler.inital_urls, crawler.max_recursion_depth)?;
     Ok(())
+}
+
+fn spawn_and_log_error<F>(fut: F) -> task::JoinHandle<()>
+where
+    F: Future<Output = DynResult<()>> + Send + 'static
+{
+    task::spawn(async move {
+        if let Err(e) = fut.await {
+            error!("{}", e);
+        }
+    })
+    
 }
 
 #[cfg(test)]

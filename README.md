@@ -5,7 +5,7 @@
 - [x] collect all findings from all tasks using _shared-state concurrency_
 - [x] download found images
 - [ ] refactor into _message-passing concurrency_
-- [ ] running concurrent tasks on multiple threads
+- [ ] consider using _tokio_ (reqwest) instead of _async-std_
 
 ### Github Code Crawler
 - [ ] crawl github for source code
