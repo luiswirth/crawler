@@ -2,7 +2,11 @@
 #![warn(missing_debug_implementations, rust_2018_idioms)]
 
 use chrono;
-use std::{borrow::Borrow, collections::HashSet, time::Duration};
+use std::{
+    borrow::Borrow,
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
@@ -29,6 +33,8 @@ type DynResult<T> = std::result::Result<T, DynError>;
 
 //type Sender<T> = mpsc::UnboundedSender<T>;
 //type Receiver<T> = mpsc::UnboundedReceiver<T>;
+
+mod util;
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
@@ -96,13 +102,6 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
     Ok(())
 }
 
-#[derive(Default, Debug)]
-struct Root {
-    inital_urls: Vec<Url>,
-    max_recursion_depth: u8,
-    archive: Findings,
-}
-
 fn setup_app() -> Root {
     use clap::{App as ClapApp, Arg};
 
@@ -142,9 +141,16 @@ fn setup_app() -> Root {
             Ok(url) => url,
             Err(err) => panic!("{}", err),
         })
-        .collect::<Vec<Url>>();
+        .collect::<HashSet<Url>>();
 
     root
+}
+
+#[derive(Default, Debug)]
+struct Root {
+    inital_urls: HashSet<Url>,
+    max_recursion_depth: u8,
+    archive: Vec<Finding>,
 }
 
 // schedules and dispatches crawlers on pages
@@ -152,8 +158,9 @@ fn setup_app() -> Root {
 // keep track of amount of crawlers on _domain_ to avoid overloading page
 struct Dispatcher {
     root: Root,
-    crawlers: Vec<JoinHandle<Result<Findings, CrawlError>>>, // or Vec<Task>
-                                                             //downloaders: Vec<JoinHandle<()>>, // unit to fetch images
+    crawlers: Vec<JoinHandle<Result<Finding, CrawlError>>>,
+    domain_visitors: HashMap<Url, u32>,
+    //downloaders: Vec<JoinHandle<()>>, unit to fetch images
 }
 
 impl Dispatcher {
@@ -161,40 +168,48 @@ impl Dispatcher {
         Dispatcher {
             root,
             crawlers: Vec::new(),
+            domain_visitors: HashMap::new(),
         }
     }
 
     async fn run(&mut self) {
-        for url in &self.root.inital_urls {
-            self.root.archive.domains.insert(url_to_domain(url.clone()));
-            self.root.archive.page_links.insert(url.clone());
-        }
+        let inital_finding = Finding {
+            page_links: self.root.inital_urls.clone(),
+            image_links: HashSet::new(),
+            depth: 0,
+        };
+        let mut uncrawled_findings: Vec<Finding> = vec![inital_finding];
 
-        // await crawlers to gather findings
-        // later: use Channel for _message-passing_ concurrency
-
-        // generalize to findings
-        let mut next_links: HashSet<Url> = self.root.inital_urls.clone().into_iter().collect();
-        let mut link_archive: HashSet<Url> = HashSet::new();
-
-        for _depth in 0..self.root.max_recursion_depth {
-            for url in &next_links {
-                self.crawlers.push(task::spawn(crawl_page(url.clone())));
+        loop {
+            // schedule crawling tasks
+            let mut i = 0; // Vec::drain_filter() is unstable
+            while i != uncrawled_findings.len() {
+                if uncrawled_findings[i].depth < self.root.max_recursion_depth {
+                    let uncrawled = uncrawled_findings.remove(i);
+                    for link in &uncrawled.page_links {
+                        self.crawlers.push(task::spawn(crawl_page(link.clone())));
+                    }
+                    self.root.archive.push(uncrawled);
+                } else {
+                    i += 1;
+                }
             }
 
             for crawler in self.crawlers.drain(..) {
+                // await crawlers to gather findings
+                // later: use Channel for _message-passing_ concurrency
                 let crawl_result = crawler.await;
                 match crawl_result {
                     Err(e) => warn!("{}", &e),
                     Ok(new_findings) => {
                         // TODO: optimize
-                        let difference = new_findings
-                            .page_links
-                            .difference(&self.root.archive.page_links)
-                            .cloned()
-                            .collect::<HashSet<_>>();
-                        link_archive.extend(difference.clone());
-                        next_links = difference;
+
+                        let mut difference = new_findings;
+                        for finding in &self.root.archive {
+                            difference = difference.difference(finding);
+                        }
+
+                        uncrawled_findings.push(difference);
                     }
                 };
             }
@@ -203,40 +218,51 @@ impl Dispatcher {
 }
 
 #[derive(Default, Debug)]
-struct RawFindings {
+struct RawFinding {
     page_links: Vec<String>,
     image_links: Vec<String>,
+    depth: u8,
 }
 
 #[derive(Default, Debug)]
-struct Findings {
-    domains: HashSet<Url>,
+struct Finding {
     page_links: HashSet<Url>,
     image_links: HashSet<Url>,
+    depth: u8,
 }
 
-impl RawFindings {
-    fn parse(self, page_url: &Url) -> Findings {
+impl RawFinding {
+    fn parse(self, page_url: &Url) -> Finding {
         let page_links = parse_links(self.page_links, page_url);
         let image_links = parse_links(self.image_links, page_url);
-        let domains = page_links
-            .iter()
-            .map(|u| url_to_domain(u.clone()))
-            .collect();
-        Findings {
-            domains,
+        Finding {
             page_links,
             image_links,
+            depth: self.depth,
         }
     }
 }
 
-impl Findings {
-    #[allow(dead_code)]
+impl Finding {
     fn extend(&mut self, other: Self) {
-        self.domains.extend(other.domains);
         self.page_links.extend(other.page_links);
         self.image_links.extend(other.image_links);
+    }
+
+    fn difference(&self, other: &Self) -> Finding {
+        Finding {
+            page_links: self
+                .page_links
+                .difference(&other.page_links)
+                .cloned()
+                .collect(),
+            image_links: self
+                .image_links
+                .difference(&other.image_links)
+                .cloned()
+                .collect(),
+            depth: self.depth,
+        }
     }
 }
 
@@ -251,6 +277,8 @@ fn parse_links(links: Vec<String>, page_url: &Url) -> HashSet<Url> {
             }
             Ok(url) => Some(url),
         })
+        .filter(|u| u.scheme().contains("http"))
+        .filter(|u| u.host().is_some())
         .collect()
 }
 
@@ -260,18 +288,18 @@ fn url_to_domain(mut url: Url) -> Url {
     url
 }
 
-async fn crawl_page(url: Url) -> CrawlResult<Findings> {
+async fn crawl_page(url: Url) -> CrawlResult<Finding> {
     info!("crawling url `{}`", &url);
 
     let future = timeout(GET_REQUEST_TIMEOUT, surf::get(&url).recv_string());
     let body = match future.await {
         Err(_) => {
-            return Err(CrawlError::Timeout);
+            return Err(CrawlError::Timeout(url));
         }
         Ok(request) => match request {
             Ok(page) => page,
             Err(err) => {
-                return Err(CrawlError::Get(err));
+                return Err(CrawlError::Get(err, url));
             }
         },
     };
@@ -280,21 +308,21 @@ async fn crawl_page(url: Url) -> CrawlResult<Findings> {
     Ok(new_findings)
 }
 
-fn process_page(page_url: &Url, page_body: String) -> Findings {
+fn process_page(page_url: &Url, page_body: String) -> Finding {
     let mut page_url = page_url.clone();
     page_url.set_path("");
     page_url.set_query(None);
 
-    let mut findings = RawFindings::default();
-    let mut tokenizer = Tokenizer::new(&mut findings, TokenizerOpts::default());
+    let mut raw_findings = RawFinding::default();
+    let mut tokenizer = Tokenizer::new(&mut raw_findings, TokenizerOpts::default());
     let mut buffer = BufferQueue::new();
     buffer.push_back(page_body.into());
     let _ = tokenizer.feed(&mut buffer);
 
-    findings.parse(&page_url)
+    raw_findings.parse(&page_url)
 }
 
-impl TokenSink for &mut RawFindings {
+impl TokenSink for &mut RawFinding {
     type Handle = ();
 
     fn process_token(&mut self, token: Token, _line_number: u64) -> TokenSinkResult<Self::Handle> {
@@ -393,8 +421,8 @@ use http_types::Error as HttpError;
 
 #[derive(Debug)]
 enum CrawlError {
-    Timeout,
-    Get(HttpError),
+    Timeout(Url),
+    Get(HttpError, Url),
 }
 
 type CrawlResult<T> = Result<T, CrawlError>;
@@ -402,11 +430,11 @@ type CrawlResult<T> = Result<T, CrawlError>;
 impl std::fmt::Display for CrawlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CrawlError::Timeout => write!(f, "future timed out"),
-            CrawlError::Get(e) =>
+            CrawlError::Timeout(url) => write!(f, "future timed out with url `{}`", url),
+            CrawlError::Get(e, url) =>
             //e.fmt(f)
             {
-                write!(f, "GET error: {}", e)
+                write!(f, "GET error: {} with url `{}`", e, url)
             }
         }
     }
@@ -415,8 +443,8 @@ impl std::fmt::Display for CrawlError {
 impl std::error::Error for CrawlError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            CrawlError::Timeout => None,
-            CrawlError::Get(e) => Some(e.as_ref()),
+            CrawlError::Timeout(_) => None,
+            CrawlError::Get(e, _) => Some(e.as_ref()),
         }
     }
 }
