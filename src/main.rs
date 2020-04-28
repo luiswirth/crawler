@@ -11,20 +11,23 @@ use std::{
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
-use async_std::{
-    fs::File,
-    future::timeout,
+use futures::{
     prelude::*,
-    //sync::{Arc, Mutex},
+};
+
+use tokio::{
+    //prelude::*,
     task::{self, JoinHandle},
 };
-//use futures::channel::mpsc;
+
+use reqwest::{
+    Client,
+};
 
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
     TokenizerOpts,
 };
-use surf;
 use url::{ParseError, Url};
 
 type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -38,17 +41,16 @@ mod util;
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
+const MAX_CRAWLER_PER_DOMAIN: u32 = 512;
+const MAX_CRAWLER_TOTAL: u32 = 4096;
 
-fn main() -> DynResult<()> {
+#[tokio::main]
+async fn main() -> DynResult<()> {
     setup_logger()?;
-    let root = setup_app();
-
-    info!("crawling these urls:\n{:?}", root.inital_urls);
-    let mut dispatcher = Dispatcher::new(root);
-
-    task::block_on(async move {
-        dispatcher.run().await;
-    });
+    let (inital_urls, max_recursion_depth) = setup_app();
+    info!("crawling these urls:\n{:?}", &inital_urls);
+    let mut dispatcher = Dispatcher::new(inital_urls, max_recursion_depth)?;
+    dispatcher.run().await;
 
     Ok(())
 }
@@ -102,7 +104,7 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
     Ok(())
 }
 
-fn setup_app() -> Root {
+fn setup_app() -> (HashSet<Url>, u8) {
     use clap::{App as ClapApp, Arg};
 
     let app = ClapApp::new("crawler")
@@ -130,11 +132,10 @@ fn setup_app() -> Root {
                 .default_value("2"),
         );
 
-    let mut root = Root::default();
 
     let matches = app.get_matches();
-    root.max_recursion_depth = matches.value_of("depth").unwrap().parse().unwrap();
-    root.inital_urls = matches
+    let max_recursion_depth = matches.value_of("depth").unwrap().parse().unwrap();
+    let inital_urls = matches
         .values_of("url")
         .unwrap()
         .map(|url| match Url::parse(url) {
@@ -143,38 +144,42 @@ fn setup_app() -> Root {
         })
         .collect::<HashSet<Url>>();
 
-    root
-}
-
-#[derive(Default, Debug)]
-struct Root {
-    inital_urls: HashSet<Url>,
-    max_recursion_depth: u8,
-    archive: Vec<Finding>,
+    (inital_urls, max_recursion_depth)
 }
 
 // schedules and dispatches crawlers on pages
 // keep track of urls already crawled to avoid recrawling
 // keep track of amount of crawlers on _domain_ to avoid overloading page
+#[derive(Debug)]
 struct Dispatcher {
-    root: Root,
-    crawlers: Vec<JoinHandle<Result<Finding, CrawlError>>>,
+    client: Client,
+    inital_urls: HashSet<Url>,
+    max_recursion_depth: u8,
+    archive: Vec<Finding>,
+    crawlers: Vec<JoinHandle<reqwest::Result<Finding>>>,
     domain_visitors: HashMap<Url, u32>,
     //downloaders: Vec<JoinHandle<()>>, unit to fetch images
 }
 
 impl Dispatcher {
-    fn new(root: Root) -> Dispatcher {
-        Dispatcher {
-            root,
+    fn new(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<Dispatcher, reqwest::Error> {
+        let client = Client::builder()
+            .timeout(GET_REQUEST_TIMEOUT)
+            .build()?;
+        
+        Ok(Dispatcher {
+            client,
+            inital_urls,
+            max_recursion_depth,
+            archive: Vec::new(),
             crawlers: Vec::new(),
             domain_visitors: HashMap::new(),
-        }
+        })
     }
 
     async fn run(&mut self) {
         let inital_finding = Finding {
-            page_links: self.root.inital_urls.clone(),
+            page_links: self.inital_urls.clone(),
             image_links: HashSet::new(),
             depth: 0,
         };
@@ -184,12 +189,12 @@ impl Dispatcher {
             // schedule crawling tasks
             let mut i = 0; // Vec::drain_filter() is unstable
             while i != uncrawled_findings.len() {
-                if uncrawled_findings[i].depth < self.root.max_recursion_depth {
+                if uncrawled_findings[i].depth < self.max_recursion_depth {
                     let uncrawled = uncrawled_findings.remove(i);
                     for link in &uncrawled.page_links {
-                        self.crawlers.push(task::spawn(crawl_page(link.clone())));
+                        self.crawlers.push(task::spawn(crawl_page(link.clone(), self.client.clone())));
                     }
-                    self.root.archive.push(uncrawled);
+                    self.archive.push(uncrawled);
                 } else {
                     i += 1;
                 }
@@ -198,14 +203,14 @@ impl Dispatcher {
             for crawler in self.crawlers.drain(..) {
                 // await crawlers to gather findings
                 // later: use Channel for _message-passing_ concurrency
-                let crawl_result = crawler.await;
+                let crawl_result = crawler.await.expect("the crawler panicked");
                 match crawl_result {
                     Err(e) => warn!("{}", &e),
                     Ok(new_findings) => {
                         // TODO: optimize
 
                         let mut difference = new_findings;
-                        for finding in &self.root.archive {
+                        for finding in &self.archive {
                             difference = difference.difference(finding);
                         }
 
@@ -288,21 +293,12 @@ fn url_to_domain(mut url: Url) -> Url {
     url
 }
 
-async fn crawl_page(url: Url) -> CrawlResult<Finding> {
+async fn crawl_page(url: Url, client: Client) -> reqwest::Result<Finding> {
     info!("crawling url `{}`", &url);
 
-    let future = timeout(GET_REQUEST_TIMEOUT, surf::get(&url).recv_string());
-    let body = match future.await {
-        Err(_) => {
-            return Err(CrawlError::Timeout(url));
-        }
-        Ok(request) => match request {
-            Ok(page) => page,
-            Err(err) => {
-                return Err(CrawlError::Get(err, url));
-            }
-        },
-    };
+    let request = client.get(url.clone());
+    let response = request.send().await?;
+    let body = response.text().await?;
 
     let new_findings = process_page(&url, body);
     Ok(new_findings)
@@ -363,9 +359,10 @@ impl TokenSink for &mut RawFinding {
 }
 
 #[allow(dead_code)]
-async fn fetch_images(urls: Vec<Url>) -> DynResult<()> {
+async fn fetch_images(urls: Vec<Url>, client: Client) -> DynResult<()> {
     let mut tasks = Vec::new();
     for url in urls.into_iter() {
+        let client = client.clone();
         let task = task::spawn(async move {
             info!("fetching `{}`", url);
             let path_segments = match url.path_segments() {
@@ -376,31 +373,28 @@ async fn fetch_images(urls: Vec<Url>) -> DynResult<()> {
             };
             let file_path = path_segments.last().unwrap();
             let file_path = format!("archive/imgs/{}", file_path);
-            let mut file = File::create(file_path).await?;
+            //let mut file = File::create(file_path).await?;
 
-            let request = timeout(GET_REQUEST_TIMEOUT, surf::get(&url).recv_bytes());
-            let request = match request.await {
-                Ok(request) => request,
-                Err(_) => {
-                    warn!("GET-request timeout with url `{}`", &url);
-                    return Ok(());
-                }
-            };
 
-            let img_bytes = match request {
-                Ok(res) => res,
-                Err(err) => {
-                    error!("GET-request error `{}` with url `{}`", err, &url);
-                    return Ok(());
-                }
-            };
-            let _ = file.write(&img_bytes).await?;
+            let request = client.get(url.clone());
+            let response = request.send().await?;
+            let bytes = response.bytes().await?;
+
+
+            //let img_bytes = match request {
+                //Ok(res) => res,
+                //Err(err) => {
+                    //error!("GET-request error `{}` with url `{}`", err, &url);
+                    //return Ok(());
+                //}
+            //};
+            //let _ = file.write(&img_bytes).await?;
             Ok::<(), DynError>(())
         });
         tasks.push(task);
     }
     for task in tasks.into_iter() {
-        task.await?;
+        task.await??;
     }
     Ok(())
 }
@@ -415,38 +409,6 @@ where
             error!("{}", e);
         }
     })
-}
-
-use http_types::Error as HttpError;
-
-#[derive(Debug)]
-enum CrawlError {
-    Timeout(Url),
-    Get(HttpError, Url),
-}
-
-type CrawlResult<T> = Result<T, CrawlError>;
-
-impl std::fmt::Display for CrawlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CrawlError::Timeout(url) => write!(f, "future timed out with url `{}`", url),
-            CrawlError::Get(e, url) =>
-            //e.fmt(f)
-            {
-                write!(f, "GET error: {} with url `{}`", e, url)
-            }
-        }
-    }
-}
-
-impl std::error::Error for CrawlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            CrawlError::Timeout(_) => None,
-            CrawlError::Get(e, _) => Some(e.as_ref()),
-        }
-    }
 }
 
 #[cfg(test)]
