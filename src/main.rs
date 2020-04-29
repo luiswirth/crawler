@@ -11,18 +11,11 @@ use std::{
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
-use futures::{
-    prelude::*,
-};
+use futures::{prelude::*, stream::FuturesUnordered};
 
-use tokio::{
-    //prelude::*,
-    task::{self, JoinHandle},
-};
+use tokio::task::{self, JoinHandle};
 
-use reqwest::{
-    Client,
-};
+use reqwest::Client;
 
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
@@ -34,13 +27,10 @@ type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type DynResult<T> = std::result::Result<T, DynError>;
 //type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = DynResult<T>> + Send>>;
 
-//type Sender<T> = mpsc::UnboundedSender<T>;
-//type Receiver<T> = mpsc::UnboundedReceiver<T>;
-
 mod util;
 
 // constants
-const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(4000);
+const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
 const MAX_CRAWLER_PER_DOMAIN: u32 = 512;
 const MAX_CRAWLER_TOTAL: u32 = 4096;
 
@@ -132,7 +122,6 @@ fn setup_app() -> (HashSet<Url>, u8) {
                 .default_value("2"),
         );
 
-
     let matches = app.get_matches();
     let max_recursion_depth = matches.value_of("depth").unwrap().parse().unwrap();
     let inital_urls = matches
@@ -156,23 +145,26 @@ struct Dispatcher {
     inital_urls: HashSet<Url>,
     max_recursion_depth: u8,
     archive: Vec<Finding>,
-    crawlers: Vec<JoinHandle<reqwest::Result<Finding>>>,
+    crawlers: FuturesUnordered<JoinHandle<reqwest::Result<Finding>>>,
     domain_visitors: HashMap<Url, u32>,
     //downloaders: Vec<JoinHandle<()>>, unit to fetch images
 }
 
 impl Dispatcher {
-    fn new(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<Dispatcher, reqwest::Error> {
+    fn new(
+        inital_urls: HashSet<Url>,
+        max_recursion_depth: u8,
+    ) -> Result<Dispatcher, reqwest::Error> {
         let client = Client::builder()
-            .timeout(GET_REQUEST_TIMEOUT)
+            .connect_timeout(GET_REQUEST_TIMEOUT)
             .build()?;
-        
+
         Ok(Dispatcher {
             client,
             inital_urls,
             max_recursion_depth,
             archive: Vec::new(),
-            crawlers: Vec::new(),
+            crawlers: FuturesUnordered::new(),
             domain_visitors: HashMap::new(),
         })
     }
@@ -192,7 +184,8 @@ impl Dispatcher {
                 if uncrawled_findings[i].depth < self.max_recursion_depth {
                     let uncrawled = uncrawled_findings.remove(i);
                     for link in &uncrawled.page_links {
-                        self.crawlers.push(task::spawn(crawl_page(link.clone(), self.client.clone())));
+                        self.crawlers
+                            .push(task::spawn(crawl_page(link.clone(), self.client.clone())));
                     }
                     self.archive.push(uncrawled);
                 } else {
@@ -200,23 +193,21 @@ impl Dispatcher {
                 }
             }
 
-            for crawler in self.crawlers.drain(..) {
-                // await crawlers to gather findings
-                // later: use Channel for _message-passing_ concurrency
-                let crawl_result = crawler.await.expect("the crawler panicked");
-                match crawl_result {
-                    Err(e) => warn!("{}", &e),
-                    Ok(new_findings) => {
-                        // TODO: optimize
+            //let (finding, resolved_idx, remaining_crawlers) = select_all(self.crawlers.iter_mut()).await;
+            //self.crawlers.remove(resolved_idx);
 
-                        let mut difference = new_findings;
-                        for finding in &self.archive {
-                            difference = difference.difference(finding);
-                        }
-
-                        uncrawled_findings.push(difference);
+            match self.crawlers.next().await {
+                None => info!("All urls have been crawled!"),
+                Some(Err(e)) => warn!("{}", e),
+                Some(Ok(Err(e))) => warn!("{}", e),
+                Some(Ok(Ok(new_finding))) => {
+                    let mut difference = new_finding;
+                    for finding in &self.archive {
+                        difference = difference.difference(finding);
                     }
-                };
+
+                    uncrawled_findings.push(difference);
+                }
             }
         }
     }
@@ -375,18 +366,16 @@ async fn fetch_images(urls: Vec<Url>, client: Client) -> DynResult<()> {
             let file_path = format!("archive/imgs/{}", file_path);
             //let mut file = File::create(file_path).await?;
 
-
             let request = client.get(url.clone());
             let response = request.send().await?;
             let bytes = response.bytes().await?;
 
-
             //let img_bytes = match request {
-                //Ok(res) => res,
-                //Err(err) => {
-                    //error!("GET-request error `{}` with url `{}`", err, &url);
-                    //return Ok(());
-                //}
+            //Ok(res) => res,
+            //Err(err) => {
+            //error!("GET-request error `{}` with url `{}`", err, &url);
+            //return Ok(());
+            //}
             //};
             //let _ = file.write(&img_bytes).await?;
             Ok::<(), DynError>(())

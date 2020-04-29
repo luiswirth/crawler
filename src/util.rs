@@ -1,16 +1,23 @@
 pub fn drain_where<T, F>(vec: &mut Vec<T>, filter: F) -> DrainWhere<'_, T, F>
-    where
-        F: FnMut(&mut T) -> bool,
-    {
-        let old_len = vec.len();
+where
+    F: FnMut(&mut T) -> bool,
+{
+    let old_len = vec.len();
 
-        // Guard against us getting leaked (leak amplification)
-        unsafe {
-            vec.set_len(0);
-        }
-
-        DrainWhere { vec, idx: 0, del: 0, old_len, pred: filter, panic_flag: false }
+    // Guard against us getting leaked (leak amplification)
+    unsafe {
+        vec.set_len(0);
     }
+
+    DrainWhere {
+        vec,
+        idx: 0,
+        del: 0,
+        old_len,
+        pred: filter,
+        panic_flag: false,
+    }
+}
 
 #[derive(Debug)]
 pub struct DrainWhere<'a, T, F>
