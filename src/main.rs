@@ -13,7 +13,11 @@ use log::{debug, error, info, trace, warn};
 
 use futures::{prelude::*, stream::FuturesUnordered};
 
-use tokio::task::{self, JoinHandle};
+use tokio::{
+    prelude::*,
+    task::{self, JoinHandle},
+    fs::File,
+};
 
 use reqwest::Client;
 
@@ -145,8 +149,9 @@ struct Dispatcher {
     inital_urls: HashSet<Url>,
     max_recursion_depth: u8,
     archive: Vec<Finding>,
-    crawlers: FuturesUnordered<JoinHandle<reqwest::Result<Finding>>>,
     domain_visitors: HashMap<Url, u32>,
+    crawlers: FuturesUnordered<JoinHandle<reqwest::Result<Finding>>>,
+    image_fetchers: FuturesUnordered<JoinHandle<DynResult<()>>>,
     //downloaders: Vec<JoinHandle<()>>, unit to fetch images
 }
 
@@ -164,8 +169,9 @@ impl Dispatcher {
             inital_urls,
             max_recursion_depth,
             archive: Vec::new(),
-            crawlers: FuturesUnordered::new(),
             domain_visitors: HashMap::new(),
+            crawlers: FuturesUnordered::new(),
+            image_fetchers: FuturesUnordered::new(),
         })
     }
 
@@ -187,6 +193,10 @@ impl Dispatcher {
                         self.crawlers
                             .push(task::spawn(crawl_page(link.clone(), self.client.clone())));
                     }
+                    for link in &uncrawled.image_links {
+                        self.image_fetchers
+                            .push(task::spawn(fetch_image(link.clone(), self.client.clone())));
+                    }
                     self.archive.push(uncrawled);
                 } else {
                     i += 1;
@@ -197,7 +207,7 @@ impl Dispatcher {
             //self.crawlers.remove(resolved_idx);
 
             match self.crawlers.next().await {
-                None => info!("All urls have been crawled!"),
+                None => info!("all urls have been crawled"),
                 Some(Err(e)) => warn!("{}", e),
                 Some(Ok(Err(e))) => warn!("{}", e),
                 Some(Ok(Ok(new_finding))) => {
@@ -208,6 +218,13 @@ impl Dispatcher {
 
                     uncrawled_findings.push(difference);
                 }
+            }
+
+            match self.image_fetchers.next().await {
+                None => info!("all images have been fetched"),
+                Some(Err(e)) => warn!("{}", e),
+                Some(Ok(Err(e))) => warn!("{}", e),
+                Some(Ok(Ok(_))) => {},
             }
         }
     }
@@ -350,41 +367,23 @@ impl TokenSink for &mut RawFinding {
 }
 
 #[allow(dead_code)]
-async fn fetch_images(urls: Vec<Url>, client: Client) -> DynResult<()> {
-    let mut tasks = Vec::new();
-    for url in urls.into_iter() {
-        let client = client.clone();
-        let task = task::spawn(async move {
-            info!("fetching `{}`", url);
-            let path_segments = match url.path_segments() {
-                Some(segs) => segs,
-                None => {
-                    return Ok(());
-                }
-            };
-            let file_path = path_segments.last().unwrap();
-            let file_path = format!("archive/imgs/{}", file_path);
-            //let mut file = File::create(file_path).await?;
+async fn fetch_image(url: Url, client: Client) -> DynResult<()> {
+    info!("fetching `{}`", url);
+    let path_segments = match url.path_segments() {
+        Some(segs) => segs,
+        None => {
+            return Ok(());
+        }
+    };
+    let file_path = path_segments.last().unwrap();
+    let file_path = format!("archive/imgs/{}", file_path);
+    let mut file = File::create(file_path).await?;
 
-            let request = client.get(url.clone());
-            let response = request.send().await?;
-            let bytes = response.bytes().await?;
+    let request = client.get(url.clone());
+    let response = request.send().await?;
+    let bytes = response.bytes().await?;
 
-            //let img_bytes = match request {
-            //Ok(res) => res,
-            //Err(err) => {
-            //error!("GET-request error `{}` with url `{}`", err, &url);
-            //return Ok(());
-            //}
-            //};
-            //let _ = file.write(&img_bytes).await?;
-            Ok::<(), DynError>(())
-        });
-        tasks.push(task);
-    }
-    for task in tasks.into_iter() {
-        task.await??;
-    }
+    let _ = file.write_all(&bytes).await?;
     Ok(())
 }
 
