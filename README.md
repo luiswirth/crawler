@@ -5,8 +5,8 @@
 - [x] try crawling for image_urls
 - [x] collect all findings from all tasks using _shared-state concurrency_
 - [x] download found images
+- [x] transfer to _tokio_ from _async-std_
 - [ ] refactor into _message-passing concurrency_
-- [ ] consider using _tokio_ (reqwest) instead of _async-std_
 
 ### Github Code Crawler
 
