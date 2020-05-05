@@ -14,9 +14,9 @@ use log::{debug, error, info, trace, warn};
 use futures::{prelude::*, stream::FuturesUnordered};
 
 use tokio::{
+    fs::File,
     prelude::*,
     task::{self, JoinHandle},
-    fs::File,
 };
 
 use reqwest::Client;
@@ -35,13 +35,17 @@ mod util;
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
+const MAX_RECURSION_DEPTH: u8 = 4;
 const MAX_CRAWLER_PER_DOMAIN: u32 = 512;
 const MAX_CRAWLER_TOTAL: u32 = 4096;
 
 #[tokio::main]
 async fn main() -> DynResult<()> {
     setup_logger()?;
-    let (inital_urls, max_recursion_depth) = setup_app();
+    let AppInput {
+        inital_urls,
+        max_recursion_depth,
+    } = setup_app();
     info!("crawling these urls:\n{:?}", &inital_urls);
     let mut dispatcher = Dispatcher::new(inital_urls, max_recursion_depth)?;
     dispatcher.run().await;
@@ -98,10 +102,15 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
     Ok(())
 }
 
-fn setup_app() -> (HashSet<Url>, u8) {
-    use clap::{App as ClapApp, Arg};
+struct AppInput {
+    inital_urls: HashSet<Url>,
+    max_recursion_depth: u8,
+}
 
-    let app = ClapApp::new("crawler")
+fn setup_app() -> AppInput {
+    use clap::Arg;
+
+    let app = clap::App::new("crawler")
         .version(env!("CARGO_PKG_NAME"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(env!("CARGO_PKG_DESCRIPTION"))
@@ -127,7 +136,10 @@ fn setup_app() -> (HashSet<Url>, u8) {
         );
 
     let matches = app.get_matches();
-    let max_recursion_depth = matches.value_of("depth").unwrap().parse().unwrap();
+    let max_recursion_depth = matches
+        .value_of("depth")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_RECURSION_DEPTH);
     let inital_urls = matches
         .values_of("url")
         .unwrap()
@@ -137,7 +149,10 @@ fn setup_app() -> (HashSet<Url>, u8) {
         })
         .collect::<HashSet<Url>>();
 
-    (inital_urls, max_recursion_depth)
+    AppInput {
+        inital_urls,
+        max_recursion_depth,
+    }
 }
 
 // schedules and dispatches crawlers on pages
@@ -183,6 +198,7 @@ impl Dispatcher {
         };
         let mut uncrawled_findings: Vec<Finding> = vec![inital_finding];
 
+
         loop {
             // schedule crawling tasks
             let mut i = 0; // Vec::drain_filter() is unstable
@@ -206,8 +222,11 @@ impl Dispatcher {
             //let (finding, resolved_idx, remaining_crawlers) = select_all(self.crawlers.iter_mut()).await;
             //self.crawlers.remove(resolved_idx);
 
+            let mut crawler_finished = false;
+            let mut image_fetchers_finished = false;
+
             match self.crawlers.next().await {
-                None => info!("all urls have been crawled"),
+                None => crawler_finished = true,
                 Some(Err(e)) => warn!("{}", e),
                 Some(Ok(Err(e))) => warn!("{}", e),
                 Some(Ok(Ok(new_finding))) => {
@@ -221,10 +240,14 @@ impl Dispatcher {
             }
 
             match self.image_fetchers.next().await {
-                None => info!("all images have been fetched"),
+                None => image_fetchers_finished = true,
                 Some(Err(e)) => warn!("{}", e),
                 Some(Ok(Err(e))) => warn!("{}", e),
-                Some(Ok(Ok(_))) => {},
+                Some(Ok(Ok(_))) => {}
+            }
+
+            if crawler_finished && image_fetchers_finished {
+                break;
             }
         }
     }
