@@ -21,17 +21,11 @@ use tokio::{
 
 use reqwest::Client;
 
-use html5ever::tokenizer::{
-    BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
-    TokenizerOpts,
-};
 use url::{Host, ParseError, Url};
 
 type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
 type DynResult<T> = std::result::Result<T, DynError>;
 //type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = DynResult<T>> + Send>>;
-
-mod util;
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
@@ -53,111 +47,6 @@ async fn main() -> DynResult<()> {
     Ok(())
 }
 
-fn setup_logger() -> std::result::Result<(), fern::InitError> {
-    use fern::{
-        colors::{Color, ColoredLevelConfig},
-        Dispatch,
-    };
-
-    let file_dispatch = Dispatch::new()
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "{}[{}][{}] {}",
-                chrono::Local::now().format("[%H:%M:%S]"),
-                record.target(),
-                record.level(),
-                message
-            ))
-        })
-        .chain(fern::log_file(format!(
-            "logs/{}.log",
-            chrono::Local::now().format("%Y-%m-%d_%H%M%S")
-        ))?);
-
-    let colors = ColoredLevelConfig::new()
-        .trace(Color::Blue)
-        .info(Color::Green)
-        .warn(Color::Magenta)
-        .error(Color::Red);
-
-    let term_dispatch = Dispatch::new()
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "{}[{}][{}] {}",
-                chrono::Local::now().format("[%H:%M:%S]"),
-                record.target(),
-                colors.color(record.level()),
-                message
-            ))
-        })
-        .chain(std::io::stdout());
-
-    Dispatch::new()
-        .level(log::LevelFilter::Info)
-        .level_for("surf::middleware::logger::native", log::LevelFilter::Error)
-        .chain(term_dispatch)
-        .chain(file_dispatch)
-        .apply()?;
-
-    Ok(())
-}
-
-struct AppInput {
-    inital_urls: HashSet<Url>,
-    max_recursion_depth: u8,
-}
-
-fn setup_app() -> AppInput {
-    use clap::Arg;
-
-    let app = clap::App::new("crawler")
-        .version(env!("CARGO_PKG_NAME"))
-        .author(env!("CARGO_PKG_AUTHORS"))
-        .about(env!("CARGO_PKG_DESCRIPTION"))
-        .usage("crawler [OPTIONS] <url1> [url2 ...]")
-        .before_help("")
-        .after_help("")
-        .arg(
-            Arg::with_name("url")
-                .value_name("url")
-                .help("URL to start crawling from")
-                .takes_value(true)
-                .required(true)
-                .multiple(true),
-        )
-        .arg(
-            Arg::with_name("depth")
-                .short("d")
-                .long("depth")
-                .value_name("depth")
-                .help("max recursion depth")
-                .takes_value(true)
-                .default_value("2"),
-        );
-
-    let matches = app.get_matches();
-    let max_recursion_depth = matches
-        .value_of("depth")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(MAX_RECURSION_DEPTH);
-    let inital_urls = matches
-        .values_of("url")
-        .unwrap()
-        .map(|url| match Url::parse(url) {
-            Ok(url) => url,
-            Err(err) => panic!("{}", err),
-        })
-        .collect::<HashSet<Url>>();
-
-    AppInput {
-        inital_urls,
-        max_recursion_depth,
-    }
-}
-
-// schedules and dispatches crawlers on pages
-// keep track of urls already crawled to avoid recrawling
-// keep track of amount of crawlers on _domain_ to avoid overloading page
 #[derive(Debug)]
 struct Dispatcher {
     client: Client,
@@ -233,7 +122,7 @@ impl Dispatcher {
                         ))),
                         Finding::Image(..) => self
                             .image_fetchers
-                            .push(task::spawn(fetch_image(url.clone(), self.client.clone()))),
+                            .push(task::spawn(fetch(url.clone(), self.client.clone()))),
                     };
                     true
                 } else {
@@ -361,6 +250,11 @@ fn parse_links(links: Vec<String>, page_url: &Url) -> HashSet<Url> {
         .collect()
 }
 
+use html5ever::tokenizer::{
+    BufferQueue, Tag, TagKind, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer,
+    TokenizerOpts,
+};
+
 impl TokenSink for &mut Aggregate {
     type Handle = ();
 
@@ -399,23 +293,125 @@ impl TokenSink for &mut Aggregate {
     }
 }
 
-async fn fetch_image(url: Url, client: Client) -> DynResult<()> {
-    info!("fetching `{}`", url);
-    let path_segments = match url.path_segments() {
+async fn fetch(resource_url: Url, client: Client) -> DynResult<()> {
+    info!("fetching `{}`", resource_url);
+    let path_segments = match resource_url.path_segments() {
         Some(segs) => segs,
         None => {
             return Ok(());
         }
     };
     let file_path = path_segments.last().unwrap();
-    let file_path = format!("archive/imgs/{}", file_path);
+    let file_path = format!("archive/res/{}", file_path);
     let mut file = File::create(file_path).await?;
 
-    let request = client.get(url.clone());
+    let request = client.get(resource_url.clone());
     let response = request.send().await?;
     let bytes = response.bytes().await?;
 
     let _ = file.write_all(&bytes).await?;
+    Ok(())
+}
+
+struct AppInput {
+    inital_urls: HashSet<Url>,
+    max_recursion_depth: u8,
+}
+
+fn setup_app() -> AppInput {
+    use clap::Arg;
+
+    let app = clap::App::new("crawler")
+        .version(env!("CARGO_PKG_NAME"))
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
+        .usage("crawler [OPTIONS] <url1> [url2 ...]")
+        .before_help("")
+        .after_help("")
+        .arg(
+            Arg::with_name("url")
+                .value_name("url")
+                .help("URL to start crawling from")
+                .takes_value(true)
+                .required(true)
+                .multiple(true),
+        )
+        .arg(
+            Arg::with_name("depth")
+                .short("d")
+                .long("depth")
+                .value_name("depth")
+                .help("max recursion depth")
+                .takes_value(true)
+                .default_value("2"),
+        );
+
+    let matches = app.get_matches();
+    let max_recursion_depth = matches
+        .value_of("depth")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_RECURSION_DEPTH);
+    let inital_urls = matches
+        .values_of("url")
+        .unwrap()
+        .map(|url| match Url::parse(url) {
+            Ok(url) => url,
+            Err(err) => panic!("{}", err),
+        })
+        .collect::<HashSet<Url>>();
+
+    AppInput {
+        inital_urls,
+        max_recursion_depth,
+    }
+}
+
+fn setup_logger() -> std::result::Result<(), fern::InitError> {
+    use fern::{
+        colors::{Color, ColoredLevelConfig},
+        Dispatch,
+    };
+
+    let file_dispatch = Dispatch::new()
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%H:%M:%S]"),
+                record.target(),
+                record.level(),
+                message
+            ))
+        })
+        .chain(fern::log_file(format!(
+            "logs/{}.log",
+            chrono::Local::now().format("%Y-%m-%d_%H%M%S")
+        ))?);
+
+    let colors = ColoredLevelConfig::new()
+        .trace(Color::Blue)
+        .info(Color::Green)
+        .warn(Color::Magenta)
+        .error(Color::Red);
+
+    let term_dispatch = Dispatch::new()
+        .format(move |out, message, record| {
+            out.finish(format_args!(
+                "{}[{}][{}] {}",
+                chrono::Local::now().format("[%H:%M:%S]"),
+                record.target(),
+                colors.color(record.level()),
+                message
+            ))
+        })
+        .chain(std::io::stdout());
+
+    Dispatch::new()
+        .level(log::LevelFilter::Info)
+        .level_for("surf::middleware::logger::native", log::LevelFilter::Error)
+        .chain(term_dispatch)
+        .chain(file_dispatch)
+        .apply()?;
+
     Ok(())
 }
 

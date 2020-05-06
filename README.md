@@ -6,8 +6,9 @@
 - [x] collect all findings from all tasks using _shared-state concurrency_
 - [x] download found images
 - [x] transfer to _tokio_ from _async-std_
+- [x] generalize fetcher
+- [ ] fetch other data types
 - [ ] avoid being blocked by websites
-- [ ] refactor into _message-passing concurrency_
 
 ### Github Code Crawler
 
@@ -17,7 +18,7 @@
 
 ## Avoid being blacklisted
 
-- [ ] specify `User-Agent` (Googlebot/2.1 Firefox...)
+- [x] specify `User-Agent` (Googlebot/2.1 Firefox...)
 - [ ] respect `robots.txt`
 - [ ] slow down request frequency
 - [ ] mimic human behaviour -> randomness
