@@ -164,7 +164,7 @@ struct Dispatcher {
     inital_urls: HashSet<Url>,
     max_recursion_depth: u8,
     archive: Vec<Finding>,
-    domain_visitors: HashMap<Url, u32>,
+    current_visits: HashMap<Url, u32>,
     crawlers: FuturesUnordered<JoinHandle<reqwest::Result<Finding>>>,
     image_fetchers: FuturesUnordered<JoinHandle<DynResult<()>>>,
     //downloaders: Vec<JoinHandle<()>>, unit to fetch images
@@ -184,7 +184,7 @@ impl Dispatcher {
             inital_urls,
             max_recursion_depth,
             archive: Vec::new(),
-            domain_visitors: HashMap::new(),
+            current_visits: HashMap::new(),
             crawlers: FuturesUnordered::new(),
             image_fetchers: FuturesUnordered::new(),
         })
@@ -230,9 +230,13 @@ impl Dispatcher {
                 Some(Err(e)) => warn!("{}", e),
                 Some(Ok(Err(e))) => warn!("{}", e),
                 Some(Ok(Ok(new_finding))) => {
-                    let mut difference = new_finding;
+                    self.
+                    let mut difference = new_finding.clone();
                     for finding in &self.archive {
                         difference = difference.difference(finding);
+                        for url in &new_finding.page_links {
+                            self.current_visits.entry(url.clone()).and_modify(|n| *n += 1);
+                        }
                     }
 
                     uncrawled_findings.push(difference);
@@ -260,7 +264,7 @@ struct RawFinding {
     depth: u8,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Finding {
     page_links: HashSet<Url>,
     image_links: HashSet<Url>,
@@ -322,6 +326,21 @@ fn url_to_domain(mut url: Url) -> Url {
     url.set_path("");
     url.set_query(None);
     url
+}
+
+struct Crawler {
+    JoinHandle // TODO: JoinHandle (task::spawn) in Crawler or outside?
+    web_client: Client,
+    inital_url: Url,
+
+}
+
+impl Crawler {
+    async fn spawn(url: Url, client: Client) -> reqest::Res {
+
+    }
+    
+    async fn resolve() -> reqwest::Result<Finding>
 }
 
 async fn crawl_page(url: Url, client: Client) -> reqwest::Result<Finding> {
