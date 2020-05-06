@@ -1,7 +1,7 @@
 //!
 #![warn(missing_debug_implementations, rust_2018_idioms)]
+#![feature(drain_filter)]
 
-use chrono;
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet},
@@ -36,8 +36,7 @@ mod util;
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
 const MAX_RECURSION_DEPTH: u8 = 4;
-const MAX_CRAWLER_PER_DOMAIN: u32 = 512;
-const MAX_CRAWLER_TOTAL: u32 = 4096;
+const MAX_HOST_VISITORS: u32 = 512;
 
 #[tokio::main]
 async fn main() -> DynResult<()> {
@@ -164,10 +163,28 @@ struct Dispatcher {
     inital_urls: HashSet<Url>,
     max_recursion_depth: u8,
     archive: Vec<Finding>,
-    current_visits: HashMap<Url, u32>,
-    crawlers: FuturesUnordered<JoinHandle<reqwest::Result<Finding>>>,
+    host_visits: HashMap<url::Host, u32>,
+    crawlers: FuturesUnordered<JoinHandle<reqwest::Result<CrawlResponse>>>,
     image_fetchers: FuturesUnordered<JoinHandle<DynResult<()>>>,
-    //downloaders: Vec<JoinHandle<()>>, unit to fetch images
+}
+
+struct Queue {
+    page_links: Vec<Url>,
+    image_links: Vec<Url>,
+}
+
+#[derive(Default, Debug)]
+struct RawFinding {
+    page_links: Vec<String>,
+    image_links: Vec<String>,
+    depth: u8,
+}
+
+#[derive(Default, Debug, Clone)]
+struct Finding {
+    page_links: HashSet<Url>,
+    image_links: HashSet<Url>,
+    depth: u8,
 }
 
 impl Dispatcher {
@@ -177,6 +194,7 @@ impl Dispatcher {
     ) -> Result<Dispatcher, reqwest::Error> {
         let client = Client::builder()
             .connect_timeout(GET_REQUEST_TIMEOUT)
+            .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:76.0) Gecko/20100101 Firefox/76.0")
             .build()?;
 
         Ok(Dispatcher {
@@ -184,43 +202,56 @@ impl Dispatcher {
             inital_urls,
             max_recursion_depth,
             archive: Vec::new(),
-            current_visits: HashMap::new(),
+            host_visits: HashMap::new(),
             crawlers: FuturesUnordered::new(),
             image_fetchers: FuturesUnordered::new(),
         })
     }
 
     async fn run(&mut self) {
-        let inital_finding = Finding {
-            page_links: self.inital_urls.clone(),
-            image_links: HashSet::new(),
-            depth: 0,
+        let mut queue = Queue {
+            page_links: self.inital_urls.iter().cloned().collect(),
+            image_links: Vec::new(),
         };
-        let mut uncrawled_findings: Vec<Finding> = vec![inital_finding];
-
 
         loop {
-            // schedule crawling tasks
-            let mut i = 0; // Vec::drain_filter() is unstable
-            while i != uncrawled_findings.len() {
-                if uncrawled_findings[i].depth < self.max_recursion_depth {
-                    let uncrawled = uncrawled_findings.remove(i);
-                    for link in &uncrawled.page_links {
-                        self.crawlers
-                            .push(task::spawn(crawl_page(link.clone(), self.client.clone())));
-                    }
-                    for link in &uncrawled.image_links {
-                        self.image_fetchers
-                            .push(task::spawn(fetch_image(link.clone(), self.client.clone())));
-                    }
-                    self.archive.push(uncrawled);
-                } else {
-                    i += 1;
-                }
-            }
+            queue.page_links.drain_filter(|l| {
+                let host = l.host().expect("url must have host").to_owned();
+                let visits = self.host_visits.entry(host.clone()).or_insert(0);
 
-            //let (finding, resolved_idx, remaining_crawlers) = select_all(self.crawlers.iter_mut()).await;
-            //self.crawlers.remove(resolved_idx);
+                if *visits < MAX_HOST_VISITORS {
+                    *visits += 1;
+                    self.crawlers
+                        .push(task::spawn(crawl_page(l.clone(), self.client.clone())));
+                    true
+                } else {
+                    info!(
+                        "too many visitors on `{}`, requeueing `{}`",
+                        host.to_string(),
+                        l
+                    );
+                    false
+                }
+            });
+
+            queue.image_links.drain_filter(|l| {
+                let host = l.host().expect("url must have host").to_owned();
+                let visits = self.host_visits.entry(host.clone()).or_insert(0);
+
+                if *visits < MAX_HOST_VISITORS {
+                    *visits += 1;
+                    self.image_fetchers
+                        .push(task::spawn(fetch_image(l.clone(), self.client.clone())));
+                    true
+                } else {
+                    info!(
+                        "too many visitors on `{}`, requeueing `{}`",
+                        host.to_string(),
+                        l
+                    );
+                    false
+                }
+            });
 
             let mut crawler_finished = false;
             let mut image_fetchers_finished = false;
@@ -229,17 +260,25 @@ impl Dispatcher {
                 None => crawler_finished = true,
                 Some(Err(e)) => warn!("{}", e),
                 Some(Ok(Err(e))) => warn!("{}", e),
-                Some(Ok(Ok(new_finding))) => {
-                    self.
-                    let mut difference = new_finding.clone();
-                    for finding in &self.archive {
-                        difference = difference.difference(finding);
-                        for url in &new_finding.page_links {
-                            self.current_visits.entry(url.clone()).and_modify(|n| *n += 1);
-                        }
-                    }
+                Some(Ok(Ok(crawl_response))) => {
+                    let CrawlResponse {
+                        mut new_finding,
+                        page_link,
+                    } = crawl_response;
 
-                    uncrawled_findings.push(difference);
+                    let host = page_link.host().expect("url must have host").to_owned();
+                    self.host_visits.entry(host).and_modify(|n| *n -= 1);
+
+                    for finding in &self.archive {
+                        new_finding = new_finding.difference(finding);
+                    }
+                    self.archive.push(new_finding.clone());
+
+                    // queue findings depending on depth
+                    if new_finding.depth < self.max_recursion_depth {
+                        queue.page_links.extend(new_finding.page_links);
+                        queue.image_links.extend(new_finding.image_links);
+                    }
                 }
             }
 
@@ -257,20 +296,6 @@ impl Dispatcher {
     }
 }
 
-#[derive(Default, Debug)]
-struct RawFinding {
-    page_links: Vec<String>,
-    image_links: Vec<String>,
-    depth: u8,
-}
-
-#[derive(Default, Debug, Clone)]
-struct Finding {
-    page_links: HashSet<Url>,
-    image_links: HashSet<Url>,
-    depth: u8,
-}
-
 impl RawFinding {
     fn parse(self, page_url: &Url) -> Finding {
         let page_links = parse_links(self.page_links, page_url);
@@ -284,11 +309,6 @@ impl RawFinding {
 }
 
 impl Finding {
-    fn extend(&mut self, other: Self) {
-        self.page_links.extend(other.page_links);
-        self.image_links.extend(other.image_links);
-    }
-
     fn difference(&self, other: &Self) -> Finding {
         Finding {
             page_links: self
@@ -322,36 +342,24 @@ fn parse_links(links: Vec<String>, page_url: &Url) -> HashSet<Url> {
         .collect()
 }
 
-fn url_to_domain(mut url: Url) -> Url {
-    url.set_path("");
-    url.set_query(None);
-    url
+// refactor?
+struct CrawlResponse {
+    new_finding: Finding,
+    page_link: Url,
 }
 
-struct Crawler {
-    JoinHandle // TODO: JoinHandle (task::spawn) in Crawler or outside?
-    web_client: Client,
-    inital_url: Url,
+async fn crawl_page(page_link: Url, client: Client) -> reqwest::Result<CrawlResponse> {
+    info!("crawling url `{}`", &page_link);
 
-}
-
-impl Crawler {
-    async fn spawn(url: Url, client: Client) -> reqest::Res {
-
-    }
-    
-    async fn resolve() -> reqwest::Result<Finding>
-}
-
-async fn crawl_page(url: Url, client: Client) -> reqwest::Result<Finding> {
-    info!("crawling url `{}`", &url);
-
-    let request = client.get(url.clone());
+    let request = client.get(page_link.clone());
     let response = request.send().await?;
     let body = response.text().await?;
 
-    let new_findings = process_page(&url, body);
-    Ok(new_findings)
+    let new_finding = process_page(&page_link, body);
+    Ok(CrawlResponse {
+        new_finding,
+        page_link,
+    })
 }
 
 fn process_page(page_url: &Url, page_body: String) -> Finding {
@@ -372,16 +380,15 @@ impl TokenSink for &mut RawFinding {
     type Handle = ();
 
     fn process_token(&mut self, token: Token, _line_number: u64) -> TokenSinkResult<Self::Handle> {
-        match token {
-            TagToken(
-                ref
-                tag
-                @
-                Tag {
-                    kind: TagKind::StartTag,
-                    ..
-                },
-            ) => match tag.name.as_ref() {
+        if let TagToken(
+            ref
+            tag @ Tag {
+                kind: TagKind::StartTag,
+                ..
+            },
+        ) = token
+        {
+            match tag.name.as_ref() {
                 "a" => {
                     for attribute in tag.attrs.iter() {
                         if attribute.name.local.as_ref() == "href" {
@@ -401,8 +408,7 @@ impl TokenSink for &mut RawFinding {
                     }
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
         TokenSinkResult::Continue
     }

@@ -1,0 +1,47 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'crawler'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=crawler",
+                    "--package=crawler",
+                ],
+                "filter": {
+                    "name": "crawler",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "https://en.wikipedia.org/wiki/Special:Random"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'crawler'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=crawler",
+                    "--package=crawler"
+                ],
+                "filter": {
+                    "name": "crawler",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
