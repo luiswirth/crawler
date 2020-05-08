@@ -10,6 +10,14 @@
 - [ ] fetch other data types
 - [ ] avoid being blocked by websites
 
+## to consider
+
+- [ ] split code into lib and bin
+- [ ] use crate `exitcode` and do `std::process::exit(..)`
+- [ ] use crate `confy` for a configuration file
+- [ ] use crate `proptest` for testing arbitrary input
+- [ ] use crate `indicatif` for progressbars
+
 ### Github Code Crawler
 
 - [ ] crawl github for source code

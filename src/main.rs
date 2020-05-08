@@ -23,9 +23,8 @@ use reqwest::Client;
 
 use url::{Host, ParseError, Url};
 
-type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
-type DynResult<T> = std::result::Result<T, DynError>;
-//type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = DynResult<T>> + Send>>;
+use lw::DynResult;
+use lwirth_rs as lw;
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
@@ -56,7 +55,7 @@ struct Dispatcher {
     host_visits: HashMap<Host, u32>,
 
     crawlers: FuturesUnordered<JoinHandle<reqwest::Result<CrawlResponse>>>,
-    image_fetchers: FuturesUnordered<JoinHandle<DynResult<()>>>,
+    fetchers: FuturesUnordered<JoinHandle<DynResult<()>>>,
 }
 
 // page can be crawled
@@ -90,7 +89,7 @@ impl Dispatcher {
             archive: HashSet::new(),
             host_visits: HashMap::new(),
             crawlers: FuturesUnordered::new(),
-            image_fetchers: FuturesUnordered::new(),
+            fetchers: FuturesUnordered::new(),
         })
     }
 
@@ -121,7 +120,7 @@ impl Dispatcher {
                             *depth,
                         ))),
                         Finding::Image(..) => self
-                            .image_fetchers
+                            .fetchers
                             .push(task::spawn(fetch(url.clone(), self.client.clone()))),
                     };
                     true
@@ -163,7 +162,7 @@ impl Dispatcher {
                 }
             }
 
-            match self.image_fetchers.next().await {
+            match self.fetchers.next().await {
                 None => fetchers_finished = true,
                 Some(Err(e)) => warn!("{}", e),
                 Some(Ok(Err(e))) => warn!("{}", e),
@@ -319,8 +318,18 @@ struct AppInput {
 }
 
 fn setup_app() -> AppInput {
-    use clap::Arg;
+    ctrlc::set_handler(|| {
+        println!("received Ctrl-C/SIGINT");
+        // TODO: set global Arc<AtomicBool> which is checked in loops throughout the application
+    }).expect("error when setting ctrl-c handler");
 
+    if atty::is(atty::Stream::Stdout) {
+        info!("connected to terminal");
+    } else {
+        info!("not connected to terminal");
+    }
+
+    use clap::Arg;
     let app = clap::App::new("crawler")
         .version(env!("CARGO_PKG_NAME"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -343,8 +352,13 @@ fn setup_app() -> AppInput {
                 .value_name("depth")
                 .help("max recursion depth")
                 .takes_value(true)
-                .default_value("2"),
+        )
+        .arg(
+            Arg::with_name("verbose")
+                .short("v")
+                .long("verbose"),
         );
+        // TODO: use verbose
 
     let matches = app.get_matches();
     let max_recursion_depth = matches
@@ -375,8 +389,8 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
     let file_dispatch = Dispatch::new()
         .format(move |out, message, record| {
             out.finish(format_args!(
-                "{}[{}][{}] {}",
-                chrono::Local::now().format("[%H:%M:%S]"),
+                "[{}][{}][{}] {}",
+                chrono::Local::now().format("%H:%M:%S"),
                 record.target(),
                 record.level(),
                 message
@@ -393,11 +407,11 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
         .warn(Color::Magenta)
         .error(Color::Red);
 
+    // TODO: nicer formatting for stdout ex: `=>` or `>` in color
     let term_dispatch = Dispatch::new()
         .format(move |out, message, record| {
             out.finish(format_args!(
-                "{}[{}][{}] {}",
-                chrono::Local::now().format("[%H:%M:%S]"),
+                "[{}][{}] {}",
                 record.target(),
                 colors.color(record.level()),
                 message
