@@ -6,10 +6,13 @@ edition = "2018"
 
 description = "web crawler written in rust"
 readme = "README.md"
+keywords = [ "crawler", "web", "cli" ]
+categories = [ "cli", ]
 
 homepage = "https://github.com/LU15W1R7H/crawler"
 repository = "https://github.com/LU15W1R7H/crawler.git"
 
+license = "MIT"
 
 # for cargo flamegraph
 [profile.release]

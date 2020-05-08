@@ -18,6 +18,8 @@
 - [ ] use crate `proptest` for testing arbitrary input
 - [ ] use crate `indicatif` for progressbars
 
+- [ ] write a `tui` application???
+
 ### Github Code Crawler
 
 - [ ] crawl github for source code

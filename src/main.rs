@@ -1,5 +1,6 @@
 //!
-#![warn(missing_debug_implementations, rust_2018_idioms)]
+#![warn(rust_2018_idioms, missing_debug_implementations, deprecated_in_future, confusable_idents, elided_lifetimes_in_paths, keyword_idents, trivial_casts)]
+#![warn(clippy::all, clippy::correctness, clippy::style, clippy::complexity, clippy::perf, clippy::pedantic, clippy::nursery, clippy::cargo)]
 #![feature(drain_filter)]
 
 use std::{
@@ -20,7 +21,6 @@ use tokio::{
 };
 
 use reqwest::Client;
-
 use url::{Host, ParseError, Url};
 
 use lw::DynResult;
@@ -73,16 +73,13 @@ struct CrawlResponse {
 }
 
 impl Dispatcher {
-    fn new(
-        inital_urls: HashSet<Url>,
-        max_recursion_depth: u8,
-    ) -> Result<Dispatcher, reqwest::Error> {
+    fn new(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<Self, reqwest::Error> {
         let client = Client::builder()
             .connect_timeout(GET_REQUEST_TIMEOUT)
             .user_agent(USER_AGENT)
             .build()?;
 
-        Ok(Dispatcher {
+        Ok(Self {
             client,
             inital_urls,
             max_recursion_depth,
@@ -105,8 +102,7 @@ impl Dispatcher {
         while !(crawlers_finished && fetchers_finished) {
             queue.drain_filter(|f| {
                 let url = match &f {
-                    Finding::Page(url, _) => url,
-                    Finding::Image(url) => url,
+                    Finding::Page(url, _) | Finding::Image(url) => url,
                 };
                 let host = url.host().expect("url must have host").to_owned();
                 let visits = self.host_visits.entry(host.clone()).or_insert(0);
@@ -209,8 +205,8 @@ struct Aggregate {
 }
 
 impl Aggregate {
-    fn new(depth: u8) -> Self {
-        Aggregate {
+    const fn new(depth: u8) -> Self {
+        Self {
             depth,
             page_links: Vec::new(),
             image_links: Vec::new(),
@@ -268,7 +264,7 @@ impl TokenSink for &mut Aggregate {
         {
             match tag.name.as_ref() {
                 "a" => {
-                    for attribute in tag.attrs.iter() {
+                    for attribute in &tag.attrs {
                         if attribute.name.local.as_ref() == "href" {
                             let url_str: &[u8] = attribute.value.borrow();
                             let url_string = String::from_utf8_lossy(url_str).into_owned();
@@ -277,7 +273,7 @@ impl TokenSink for &mut Aggregate {
                     }
                 }
                 "img" => {
-                    for attribute in tag.attrs.iter() {
+                    for attribute in &tag.attrs {
                         if attribute.name.local.as_ref() == "src" {
                             let url_str: &[u8] = attribute.value.borrow();
                             let url_string = String::from_utf8_lossy(url_str).into_owned();
@@ -294,11 +290,10 @@ impl TokenSink for &mut Aggregate {
 
 async fn fetch(resource_url: Url, client: Client) -> DynResult<()> {
     info!("fetching `{}`", resource_url);
-    let path_segments = match resource_url.path_segments() {
-        Some(segs) => segs,
-        None => {
-            return Ok(());
-        }
+    let path_segments = if let Some(segs) = resource_url.path_segments() {
+        segs
+    } else {
+        return Ok(());
     };
     let file_path = path_segments.last().unwrap();
     let file_path = format!("archive/res/{}", file_path);
@@ -308,7 +303,7 @@ async fn fetch(resource_url: Url, client: Client) -> DynResult<()> {
     let response = request.send().await?;
     let bytes = response.bytes().await?;
 
-    let _ = file.write_all(&bytes).await?;
+    file.write_all(&bytes).await?;
     Ok(())
 }
 
@@ -318,10 +313,13 @@ struct AppInput {
 }
 
 fn setup_app() -> AppInput {
+    use clap::Arg;
+
     ctrlc::set_handler(|| {
         println!("received Ctrl-C/SIGINT");
         // TODO: set global Arc<AtomicBool> which is checked in loops throughout the application
-    }).expect("error when setting ctrl-c handler");
+    })
+    .expect("error when setting ctrl-c handler");
 
     if atty::is(atty::Stream::Stdout) {
         info!("connected to terminal");
@@ -329,7 +327,6 @@ fn setup_app() -> AppInput {
         info!("not connected to terminal");
     }
 
-    use clap::Arg;
     let app = clap::App::new("crawler")
         .version(env!("CARGO_PKG_NAME"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -351,14 +348,10 @@ fn setup_app() -> AppInput {
                 .long("depth")
                 .value_name("depth")
                 .help("max recursion depth")
-                .takes_value(true)
+                .takes_value(true),
         )
-        .arg(
-            Arg::with_name("verbose")
-                .short("v")
-                .long("verbose"),
-        );
-        // TODO: use verbose
+        .arg(Arg::with_name("verbose").short("v").long("verbose"));
+    // TODO: use verbose
 
     let matches = app.get_matches();
     let max_recursion_depth = matches
@@ -410,9 +403,15 @@ fn setup_logger() -> std::result::Result<(), fern::InitError> {
     // TODO: nicer formatting for stdout ex: `=>` or `>` in color
     let term_dispatch = Dispatch::new()
         .format(move |out, message, record| {
+            let mut target = record.target().to_string();
+            if target == "crawler" {
+                target = "".to_string();
+            } else {
+                target = format!("[{}]", target);
+            }
             out.finish(format_args!(
-                "[{}][{}] {}",
-                record.target(),
+                "{}[{}] {}",
+                target,
                 colors.color(record.level()),
                 message
             ))

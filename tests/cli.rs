@@ -2,8 +2,8 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use std::process::Command;
 
+use std::io::Write;
 use tempfile::NamedTempFile;
-use std::io::{self, Write};
 
 use lw::DynResult;
 use lwirth_rs as lw;
