@@ -1,6 +1,23 @@
 //!
-#![warn(rust_2018_idioms, missing_debug_implementations, deprecated_in_future, confusable_idents, elided_lifetimes_in_paths, keyword_idents, trivial_casts)]
-#![warn(clippy::all, clippy::correctness, clippy::style, clippy::complexity, clippy::perf, clippy::pedantic, clippy::nursery, clippy::cargo)]
+#![warn(
+    rust_2018_idioms,
+    missing_debug_implementations,
+    deprecated_in_future,
+    confusable_idents,
+    elided_lifetimes_in_paths,
+    keyword_idents,
+    trivial_casts
+)]
+#![warn(
+    clippy::all,
+    clippy::correctness,
+    clippy::style,
+    clippy::complexity,
+    clippy::perf,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo
+)]
 #![feature(drain_filter)]
 
 use std::{
@@ -39,12 +56,20 @@ async fn main() -> DynResult<()> {
         inital_urls,
         max_recursion_depth,
     } = setup_app();
-    info!("crawling these urls:\n{:?}", &inital_urls);
-    let mut dispatcher = Dispatcher::new(inital_urls, max_recursion_depth)?;
-    dispatcher.run().await;
+    run_crawler(inital_urls, max_recursion_depth).await?;
 
     Ok(())
 }
+
+async fn run_crawler(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> DynResult<()> {
+    info!("crawling these urls:\n{:?}", &inital_urls);
+    let mut dispatcher = Dispatcher::new(inital_urls, max_recursion_depth)?;
+    dispatcher.run().await;
+    Ok(())
+}
+
+type CrawlHandle = JoinHandle<reqwest::Result<CrawlResponse>>;
+type FetchHandle = JoinHandle<DynResult<()>>;
 
 #[derive(Debug)]
 struct Dispatcher {
@@ -54,8 +79,8 @@ struct Dispatcher {
     archive: HashSet<Finding>,
     host_visits: HashMap<Host, u32>,
 
-    crawlers: FuturesUnordered<JoinHandle<reqwest::Result<CrawlResponse>>>,
-    fetchers: FuturesUnordered<JoinHandle<DynResult<()>>>,
+    crawlers: FuturesUnordered<CrawlHandle>,
+    fetchers: FuturesUnordered<FetchHandle>,
 }
 
 // page can be crawled
@@ -99,7 +124,10 @@ impl Dispatcher {
             .collect();
         let (mut crawlers_finished, mut fetchers_finished) = (false, false);
 
+        // main loop
         while !(crawlers_finished && fetchers_finished) {
+
+            // dispatching loop
             queue.drain_filter(|f| {
                 let url = match &f {
                     Finding::Page(url, _) | Finding::Image(url) => url,
@@ -131,38 +159,47 @@ impl Dispatcher {
             });
 
             // Destructuring assignment not available
-            crawlers_finished = false;
-            fetchers_finished = false;
+            crawlers_finished = true;
+            fetchers_finished = true;
 
-            match self.crawlers.next().await {
-                None => crawlers_finished = true,
-                Some(Err(e)) => warn!("{}", e),
-                Some(Ok(Err(e))) => warn!("{}", e),
-                Some(Ok(Ok(crawl_response))) => {
-                    let CrawlResponse {
-                        mut new_findings,
-                        crawl_link,
-                        depth,
-                    } = crawl_response;
+            // crawl loop
+            loop {
+                match self.crawlers.next().await {
+                    None => break,
+                    Some(Err(e)) => warn!("{}", e),
+                    Some(Ok(Err(e))) => warn!("{}", e),
+                    Some(Ok(Ok(crawl_response))) => {
+                        crawlers_finished = false;
+                        let CrawlResponse {
+                            mut new_findings,
+                            crawl_link,
+                            depth,
+                        } = crawl_response;
 
-                    let host = crawl_link.host().expect("url must have host").to_owned();
-                    self.host_visits.entry(host).and_modify(|n| *n -= 1);
+                        let host = crawl_link.host().expect("url must have host").to_owned();
+                        self.host_visits.entry(host).and_modify(|n| *n -= 1);
 
-                    new_findings = new_findings.difference(&self.archive).cloned().collect();
-                    self.archive.extend(new_findings.clone());
+                        new_findings = new_findings.difference(&self.archive).cloned().collect();
+                        self.archive.extend(new_findings.clone());
 
-                    // queue findings depending on depth
-                    if depth < self.max_recursion_depth {
-                        queue.extend(new_findings);
+                        // queue findings depending on depth
+                        if depth < self.max_recursion_depth {
+                            queue.extend(new_findings);
+                        }
                     }
                 }
             }
 
-            match self.fetchers.next().await {
-                None => fetchers_finished = true,
-                Some(Err(e)) => warn!("{}", e),
-                Some(Ok(Err(e))) => warn!("{}", e),
-                Some(Ok(Ok(_))) => {}
+            // fetch loop
+            loop {
+                match self.fetchers.next().await {
+                    None => break,
+                    Some(Err(e)) => warn!("{}", e),
+                    Some(Ok(Err(e))) => warn!("{}", e),
+                    Some(Ok(Ok(_))) => {
+                        fetchers_finished = false;
+                    }
+                }
             }
         }
     }
@@ -315,12 +352,6 @@ struct AppInput {
 fn setup_app() -> AppInput {
     use clap::Arg;
 
-    ctrlc::set_handler(|| {
-        println!("received Ctrl-C/SIGINT");
-        // TODO: set global Arc<AtomicBool> which is checked in loops throughout the application
-    })
-    .expect("error when setting ctrl-c handler");
-
     if atty::is(atty::Stream::Stdout) {
         info!("connected to terminal");
     } else {
@@ -433,16 +464,5 @@ mod tests {
     #[test]
     fn test_suite_works_0() {
         assert!(true);
-    }
-
-    #[test]
-    fn test_suite_works_1() -> Result<(), ()> {
-        Ok(())
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_suite_works_2() {
-        panic!()
     }
 }
