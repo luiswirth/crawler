@@ -29,6 +29,8 @@ use std::{
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
 
+use rand::prelude::*;
+
 use futures::{prelude::*, stream::FuturesUnordered};
 
 use tokio::{
@@ -47,7 +49,16 @@ use lwirth_rs as lw;
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
 const MAX_RECURSION_DEPTH: u8 = 4;
 const MAX_HOST_VISITORS: u32 = 512;
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:76.0) Gecko/20100101 Firefox/76.0";
+
+static USER_AGENTS: &'static [&'static str] = &[
+    "Mozilla/5.0 (X11; Linux x86_64; rv:76.0) Gecko/20100101 Firefox/76.0",
+    "Mozilla/5.0 CK={} (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 12_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2272.96 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+];
 
 #[tokio::main]
 async fn main() -> DynResult<()> {
@@ -68,7 +79,7 @@ async fn run_crawler(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> DynR
     Ok(())
 }
 
-type CrawlHandle = JoinHandle<reqwest::Result<CrawlResponse>>;
+type SpiderHandle = JoinHandle<reqwest::Result<SpiderResponse>>;
 type FetchHandle = JoinHandle<DynResult<()>>;
 
 #[derive(Debug)]
@@ -79,7 +90,7 @@ struct Dispatcher {
     archive: HashSet<Finding>,
     host_visits: HashMap<Host, u32>,
 
-    crawlers: FuturesUnordered<CrawlHandle>,
+    spiders: FuturesUnordered<SpiderHandle>,
     fetchers: FuturesUnordered<FetchHandle>,
 }
 
@@ -91,7 +102,7 @@ enum Finding {
     Image(Url),
 }
 
-struct CrawlResponse {
+struct SpiderResponse {
     new_findings: HashSet<Finding>,
     crawl_link: Url,
     depth: u8,
@@ -99,9 +110,11 @@ struct CrawlResponse {
 
 impl Dispatcher {
     fn new(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<Self, reqwest::Error> {
+        let mut rng = rand::thread_rng();
+
         let client = Client::builder()
             .connect_timeout(GET_REQUEST_TIMEOUT)
-            .user_agent(USER_AGENT)
+            .user_agent(*USER_AGENTS.choose(&mut rng).unwrap())
             .build()?;
 
         Ok(Self {
@@ -110,7 +123,7 @@ impl Dispatcher {
             max_recursion_depth,
             archive: HashSet::new(),
             host_visits: HashMap::new(),
-            crawlers: FuturesUnordered::new(),
+            spiders: FuturesUnordered::new(),
             fetchers: FuturesUnordered::new(),
         })
     }
@@ -122,11 +135,10 @@ impl Dispatcher {
             .cloned()
             .map(|u| Finding::Page(u, 0))
             .collect();
-        let (mut crawlers_finished, mut fetchers_finished) = (false, false);
+        let (mut spiders_finished, mut fetchers_finished) = (false, false);
 
         // main loop
-        while !(crawlers_finished && fetchers_finished) {
-
+        while !(spiders_finished && fetchers_finished) {
             // dispatching loop
             queue.drain_filter(|f| {
                 let url = match &f {
@@ -138,7 +150,7 @@ impl Dispatcher {
                 if *visits < MAX_HOST_VISITORS {
                     *visits += 1;
                     match f {
-                        Finding::Page(_, ref depth) => self.crawlers.push(task::spawn(crawl_page(
+                        Finding::Page(_, ref depth) => self.spiders.push(task::spawn(spider_page(
                             url.clone(),
                             self.client.clone(),
                             *depth,
@@ -159,18 +171,18 @@ impl Dispatcher {
             });
 
             // Destructuring assignment not available
-            crawlers_finished = true;
+            spiders_finished = true;
             fetchers_finished = true;
 
             // crawl loop
             loop {
-                match self.crawlers.next().await {
+                match self.spiders.next().await {
                     None => break,
                     Some(Err(e)) => warn!("{}", e),
                     Some(Ok(Err(e))) => warn!("{}", e),
                     Some(Ok(Ok(crawl_response))) => {
-                        crawlers_finished = false;
-                        let CrawlResponse {
+                        spiders_finished = false;
+                        let SpiderResponse {
                             mut new_findings,
                             crawl_link,
                             depth,
@@ -205,7 +217,7 @@ impl Dispatcher {
     }
 }
 
-async fn crawl_page(crawl_link: Url, client: Client, depth: u8) -> reqwest::Result<CrawlResponse> {
+async fn spider_page(crawl_link: Url, client: Client, depth: u8) -> reqwest::Result<SpiderResponse> {
     info!("crawling url `{}`", &crawl_link);
 
     let request = client.get(crawl_link.clone());
@@ -213,7 +225,7 @@ async fn crawl_page(crawl_link: Url, client: Client, depth: u8) -> reqwest::Resu
     let body = response.text().await?;
 
     let new_findings = process_page(&crawl_link, body, depth);
-    Ok(CrawlResponse {
+    Ok(SpiderResponse {
         new_findings,
         crawl_link,
         depth,
