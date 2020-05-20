@@ -19,6 +19,7 @@ fn invalid_url() -> DynResult<()> {
     Ok(())
 }
 
+#[allow(unused)]
 fn create_temp_file() -> DynResult<()> {
     let mut file = NamedTempFile::new()?;
     writeln!(file, "some content")?;

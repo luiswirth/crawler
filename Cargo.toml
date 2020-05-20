@@ -30,22 +30,24 @@ tempfile = "3.1.0"
 lwirth-rs = { git = "https://github.com/LU15W1R7H/lwirth-rs" } # or `path = "../lwirth-rs"`
 
 futures = "0.3.5"
-tokio = { version = "0.2.20", features = ["full"] }
+tokio = { version = "0.2.21", features = ["full"] }
+
+anyhow = "1.0.31"
+thiserror = "1.0.18"
+log = "0.4.8"
+fern = { version = "0.6.0", features = ["colored"] }
+clap = "2.33.1"
 
 reqwest = "0.10.4"
 html5ever = "0.25.1"
 url = "2.1.1"
 
-clap = "2.33.0"
-log = "0.4.8"
-fern = { version = "0.6.0", features = ["colored"] }
-
 chrono = "0.4.11"
 rand = "0.7.3"
 bytes = "0.5.4"
+
 atty = "0.2.14"
 #ctrlc = "3.1.4"
-
-console = "0.11.2"
+console = "0.11.3"
 indicatif = "0.14.0"
 

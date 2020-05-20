@@ -18,16 +18,12 @@
     clippy::nursery,
     clippy::cargo
 )]
+#![allow(clippy::missing_errors_doc)]
 #![feature(drain_filter)]
 
-use std::{
-    borrow::Borrow,
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
-
-#[allow(unused_imports)]
-use log::{debug, error, info, trace, warn};
+use std::borrow::Borrow;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use rand::prelude::*;
 
@@ -42,15 +38,22 @@ use tokio::{
 use reqwest::Client;
 use url::{Host, ParseError, Url};
 
-use lw::DynResult;
-use lwirth_rs as lw;
+pub mod error;
+pub mod logging;
+
+#[allow(unused_imports)]
+pub use log::{debug, error, info, trace, warn};
+
+use error::Result;
+
+//use anyhow::{Context, Result as AnyResult};
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
 const MAX_RECURSION_DEPTH: u8 = 4;
 const MAX_HOST_VISITORS: u32 = 512;
 
-static USER_AGENTS: &'static [&'static str] = &[
+static USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (X11; Linux x86_64; rv:76.0) Gecko/20100101 Firefox/76.0",
     "Mozilla/5.0 CK={} (Windows NT 6.1; WOW64; Trident/7.0; rv:11.0) like Gecko",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 12_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
@@ -61,8 +64,8 @@ static USER_AGENTS: &'static [&'static str] = &[
 ];
 
 #[tokio::main]
-async fn main() -> DynResult<()> {
-    setup_logger()?;
+async fn main() -> Result<()> {
+    logging::setup()?;
     let AppInput {
         inital_urls,
         max_recursion_depth,
@@ -72,15 +75,15 @@ async fn main() -> DynResult<()> {
     Ok(())
 }
 
-async fn run_crawler(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> DynResult<()> {
+async fn run_crawler(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<()> {
     info!("crawling these urls:\n{:?}", &inital_urls);
     let mut dispatcher = Dispatcher::new(inital_urls, max_recursion_depth)?;
     dispatcher.run().await;
     Ok(())
 }
 
-type SpiderHandle = JoinHandle<reqwest::Result<SpiderResponse>>;
-type FetchHandle = JoinHandle<DynResult<()>>;
+type SpiderHandle = JoinHandle<Result<SpiderResponse>>;
+type FetchHandle = JoinHandle<Result<()>>;
 
 #[derive(Debug)]
 struct Dispatcher {
@@ -109,7 +112,7 @@ struct SpiderResponse {
 }
 
 impl Dispatcher {
-    fn new(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<Self, reqwest::Error> {
+    fn new(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<Self> {
         let mut rng = rand::thread_rng();
 
         let client = Client::builder()
@@ -217,7 +220,7 @@ impl Dispatcher {
     }
 }
 
-async fn spider_page(crawl_link: Url, client: Client, depth: u8) -> reqwest::Result<SpiderResponse> {
+async fn spider_page(crawl_link: Url, client: Client, depth: u8) -> Result<SpiderResponse> {
     info!("crawling url `{}`", &crawl_link);
 
     let request = client.get(crawl_link.clone());
@@ -337,7 +340,7 @@ impl TokenSink for &mut Aggregate {
     }
 }
 
-async fn fetch(resource_url: Url, client: Client) -> DynResult<()> {
+async fn fetch(resource_url: Url, client: Client) -> Result<()> {
     info!("fetching `{}`", resource_url);
     let path_segments = if let Some(segs) = resource_url.path_segments() {
         segs
@@ -346,7 +349,7 @@ async fn fetch(resource_url: Url, client: Client) -> DynResult<()> {
     };
     let file_path = path_segments.last().unwrap();
     let file_path = format!("archive/res/{}", file_path);
-    let mut file = File::create(file_path).await?;
+    let mut file = File::create(&file_path).await?;
 
     let request = client.get(resource_url.clone());
     let response = request.send().await?;
@@ -413,68 +416,5 @@ fn setup_app() -> AppInput {
     AppInput {
         inital_urls,
         max_recursion_depth,
-    }
-}
-
-fn setup_logger() -> std::result::Result<(), fern::InitError> {
-    use fern::{
-        colors::{Color, ColoredLevelConfig},
-        Dispatch,
-    };
-
-    let file_dispatch = Dispatch::new()
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "[{}][{}][{}] {}",
-                chrono::Local::now().format("%H:%M:%S"),
-                record.target(),
-                record.level(),
-                message
-            ))
-        })
-        .chain(fern::log_file(format!(
-            "logs/{}.log",
-            chrono::Local::now().format("%Y-%m-%d_%H%M%S")
-        ))?);
-
-    let colors = ColoredLevelConfig::new()
-        .trace(Color::Blue)
-        .info(Color::Green)
-        .warn(Color::Magenta)
-        .error(Color::Red);
-
-    // TODO: nicer formatting for stdout ex: `=>` or `>` in color
-    let term_dispatch = Dispatch::new()
-        .format(move |out, message, record| {
-            let mut target = record.target().to_string();
-            if target == "crawler" {
-                target = "".to_string();
-            } else {
-                target = format!("[{}]", target);
-            }
-            out.finish(format_args!(
-                "{}[{}] {}",
-                target,
-                colors.color(record.level()),
-                message
-            ))
-        })
-        .chain(std::io::stdout());
-
-    Dispatch::new()
-        .level(log::LevelFilter::Info)
-        .level_for("surf::middleware::logger::native", log::LevelFilter::Error)
-        .chain(term_dispatch)
-        .chain(file_dispatch)
-        .apply()?;
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_suite_works_0() {
-        assert!(true);
     }
 }
