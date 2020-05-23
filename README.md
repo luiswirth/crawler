@@ -6,16 +6,18 @@
 - [x] collect all findings from all tasks using _shared-state concurrency_
 - [x] download found images
 - [x] transfer to _tokio_ from _async-std_
+- [x] split code across multiple files
+- [ ] use `eyre` as error handling crate (maybe in combination with `thiserror`
+- [ ] use `tracing` as better logging library
+- [ ] log like jonhoo (./refs/jonhoo-logging.jpg)
 
 - [ ] make scheduling asynchronous -> _message-passing concurrency_?
-- [ ] split code across multiple files
 - [ ] generalize fetcher to download different resource types
 - [ ] use crate `indicatif` for progressbars
 - [ ] avoid being blocked by websites
 
 ## to consider
 
-- [ ] split code into lib and bin
 - [ ] use crate `confy` for a configuration file
 - [ ] use crate `proptest` for testing arbitrary input
 - [ ] use crate `exitcode` and do `std::process::exit(..)`
