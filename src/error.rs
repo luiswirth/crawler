@@ -8,8 +8,5 @@ pub enum Error {
     Io(#[from] io::Error),
 
     #[error("{0}")]
-    Fern(#[from] fern::InitError),
-
-    #[error("{0}")]
     Reqwest(#[from] reqwest::Error),
 }

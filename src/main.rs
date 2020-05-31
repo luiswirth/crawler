@@ -41,12 +41,16 @@ use url::{Host, ParseError, Url};
 pub mod error;
 pub mod logging;
 
-#[allow(unused_imports)]
-pub use log::{debug, error, info, trace, warn};
+#[allow(unused)]
+use color_eyre::{Help, Report, Result};
+#[allow(unused)]
+use eyre::{eyre, WrapErr};
 
-use error::Result;
-
-//use anyhow::{Context, Result as AnyResult};
+#[allow(unused)]
+use tracing::{
+    debug, debug_span, error, error_span, info, info_span, instrument, trace, trace_span, warn,
+    warn_span,
+};
 
 // constants
 const GET_REQUEST_TIMEOUT: Duration = Duration::from_millis(20000);
@@ -65,7 +69,7 @@ static USER_AGENTS: &[&str] = &[
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    logging::setup()?;
+    logging::setup();
     let AppInput {
         inital_urls,
         max_recursion_depth,
@@ -75,6 +79,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[instrument]
 async fn run_crawler(inital_urls: HashSet<Url>, max_recursion_depth: u8) -> Result<()> {
     info!("crawling these urls:\n{:?}", &inital_urls);
     let mut dispatcher = Dispatcher::new(inital_urls, max_recursion_depth)?;
@@ -131,6 +136,7 @@ impl Dispatcher {
         })
     }
 
+    #[instrument]
     async fn run(&mut self) {
         let mut queue: Vec<Finding> = self
             .inital_urls
@@ -220,6 +226,7 @@ impl Dispatcher {
     }
 }
 
+#[instrument]
 async fn spider_page(crawl_link: Url, client: Client, depth: u8) -> Result<SpiderResponse> {
     info!("crawling url `{}`", &crawl_link);
 
@@ -235,6 +242,7 @@ async fn spider_page(crawl_link: Url, client: Client, depth: u8) -> Result<Spide
     })
 }
 
+#[instrument]
 fn process_page(page_url: &Url, page_body: String, depth: u8) -> HashSet<Finding> {
     let mut page_url = page_url.clone();
     page_url.set_path("");
@@ -267,6 +275,7 @@ impl Aggregate {
 }
 
 impl Aggregate {
+    #[instrument]
     fn parse(self, page_url: &Url) -> HashSet<Finding> {
         let mut findings = HashSet::new();
 
@@ -281,6 +290,7 @@ impl Aggregate {
     }
 }
 
+#[instrument]
 fn parse_links(links: Vec<String>, page_url: &Url) -> HashSet<Url> {
     links
         .into_iter()
@@ -305,6 +315,7 @@ use html5ever::tokenizer::{
 impl TokenSink for &mut Aggregate {
     type Handle = ();
 
+    #[instrument]
     fn process_token(&mut self, token: Token, _line_number: u64) -> TokenSinkResult<Self::Handle> {
         if let TagToken(
             ref
@@ -340,6 +351,7 @@ impl TokenSink for &mut Aggregate {
     }
 }
 
+#[instrument]
 async fn fetch(resource_url: Url, client: Client) -> Result<()> {
     info!("fetching `{}`", resource_url);
     let path_segments = if let Some(segs) = resource_url.path_segments() {
@@ -364,6 +376,7 @@ struct AppInput {
     max_recursion_depth: u8,
 }
 
+#[instrument]
 fn setup_app() -> AppInput {
     use clap::Arg;
 
