@@ -1,3 +1,4 @@
 /target
-/archive/*
-/logs/*
+/.direnv
+
+/prey
